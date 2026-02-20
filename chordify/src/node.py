@@ -170,20 +170,15 @@ class Node:
         if self.successor["id"] == self.node_id:
             return []
 
-        resp = send_request(
-            self.successor["ip"],
-            self.successor["port"],
-            {
-                "type": "OVERLAY",
-                "req_id": "overlay_for_replicas",
-                "origin": {"ip": self.ip, "port": self.port},
-                "data": {"start_id": self.node_id, "acc": []},
-            },
-        )
+        resp = self.handle_message({
+        "type": "OVERLAY",
+        "req_id": "overlay_for_replicas",
+        "origin": {"ip": self.ip, "port": self.port},
+        "data": {"start_id": self.node_id, "acc": []},
+    })
         if resp.get("status") != "OK":
             return []
-
-        ring = resp["data"]["ring"]  # list of {id, ip, port} including me
+        ring = resp["data"]["ring"]
         # find me in ring
         idx = None
         for i, n in enumerate(ring):
