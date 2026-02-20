@@ -1,4 +1,6 @@
 import argparse
+from email import message
+from email.mime import message
 import uuid
 
 from hashing import sha1_int, in_interval
@@ -410,19 +412,32 @@ class Node:
            return self.make_response("OK", req_id=req_id, data={"msg": "Depart completed"})
 
                 # --- OVERLAY ---
+        # --- OVERLAY ---
         if msg_type == "OVERLAY":
             start_id = data.get("start_id")
             acc = data.get("acc", [])
 
+            # first call from client
+            if start_id is None:
+                start_id = self.node_id
+                acc = []
+
+            # add myself
             acc.append({
                 "id": self.node_id,
                 "ip": self.ip,
                 "port": self.port
             })
 
+            # stop condition
             if self.successor["id"] == start_id:
-                return self.make_response("OK", req_id=req_id, data={"ring": acc})
+                return self.make_response(
+                    "OK",
+                    req_id=req_id,
+                    data={"ring": acc}
+                )
 
+            # forward
             return send_request(
                 self.successor["ip"],
                 self.successor["port"],
@@ -433,8 +448,8 @@ class Node:
                     "data": {
                         "start_id": start_id,
                         "acc": acc
-                    }
-                }
+                    },
+                },
             )
 
         return self.make_response("UNKNOWN", req_id=req_id, data={"received_type": msg_type})
