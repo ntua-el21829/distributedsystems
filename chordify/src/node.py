@@ -9,7 +9,8 @@ from net import start_server, send_request
 
 
 class Node:
-    def __init__(self, ip: str, port: int):
+    def __init__(self, ip: str, port: int, k: int = 1):
+        self.k = max(1, int(k))
         self.ip = ip
         self.port = port
 
@@ -154,7 +155,50 @@ class Node:
         if error is not None:
             resp["error"] = error
         return resp
+    
+    
 
+    def get_replica_nodes(self) -> list[dict]:
+        """
+        Return the next (k-1) successors of THIS node in ring order.
+        Uses OVERLAY ring-walk (system is stable, no concurrent join/depart).
+        """
+        if self.k <= 1:
+            return []
+
+        # Ask the running ring (through my successor) for overlay starting at me
+        if self.successor["id"] == self.node_id:
+            return []
+
+        resp = send_request(
+            self.successor["ip"],
+            self.successor["port"],
+            {
+                "type": "OVERLAY",
+                "req_id": "overlay_for_replicas",
+                "origin": {"ip": self.ip, "port": self.port},
+                "data": {"start_id": self.node_id, "acc": []},
+            },
+        )
+        if resp.get("status") != "OK":
+            return []
+
+        ring = resp["data"]["ring"]  # list of {id, ip, port} including me
+        # find me in ring
+        idx = None
+        for i, n in enumerate(ring):
+            if n["id"] == self.node_id:
+                idx = i
+                break
+        if idx is None:
+            return []
+
+        replicas = []
+        for step in range(1, min(self.k, len(ring))):
+            j = (idx + step) % len(ring)
+            replicas.append({"ip": ring[j]["ip"], "port": ring[j]["port"], "id": ring[j]["id"]})
+        return replicas
+    
     # --- Core request handler ---
 
     def handle_message(self, message: dict) -> dict:
@@ -320,22 +364,42 @@ class Node:
             )
                 # --- INSERT ---
         if msg_type == "INSERT":
-            key = data.get("key")
-            value = data.get("value")
-            if key is None or value is None:
-                return self.make_response("ERROR", req_id=req_id, error="Missing key or value")
+           key = data.get("key")
+           value = data.get("value")
+           if key is None or value is None:
+               return self.make_response("ERROR", req_id=req_id, error="Missing key or value")
 
-            key_id = sha1_int(key)
+           key_id = sha1_int(key)
 
-            # If I am responsible -> store locally
-            if self.is_responsible(key_id):
-                self.storage.insert(key_id, key, value)
-                return self.make_response("OK", req_id=req_id, data={"stored_at": self.port})
+           # If I am responsible -> store locally as PRIMARY then replicate
+           if self.is_responsible(key_id):
+               self.storage.insert_primary(key_id, key, value)
 
-            # Otherwise forward
-            return self.forward_to_successor(message)
+               # replicate full current value (mirror primary state)
+               current = self.storage.query(key_id)
+               replicas = self.get_replica_nodes()
+               primary_info = {"ip": self.ip, "port": self.port, "id": self.node_id}
+
+               for r in replicas:
+                   send_request(r["ip"], r["port"], {
+                       "type": "REPLICA_PUT",
+                       "req_id": req_id,
+                       "origin": {"ip": self.ip, "port": self.port},
+                       "data": {
+                           "key_id": key_id,
+                           "key": key,
+                           "value": current["value"],
+                           "primary": primary_info
+                       }
+                   })
+
+               return self.make_response("OK", req_id=req_id, data={"stored_at": self.port, "replicas": len(replicas)})
+
+           # Otherwise forward
+           return self.forward_to_successor(message)
+
         
-                # --- QUERY single key ---
+        # --- QUERY ---
         if msg_type == "QUERY":
             key = data.get("key")
             if key is None:
@@ -352,32 +416,67 @@ class Node:
                         "origin": {"ip": self.ip, "port": self.port},
                         "data": {
                             "start_id": self.node_id,
-                            "acc": {f"{self.ip}:{self.port}": self.storage.get_all()}
+                            "acc": {
+                                f"{self.ip}:{self.port}": self.storage.get_all()
+                            }
                         }
                     }
                 )
 
+            # --- Single key query ---
+
             key_id = sha1_int(key)
 
-            if self.is_responsible(key_id):
-                result = self.storage.query(key_id)
-                return self.make_response("OK", req_id=req_id, data={"result": result})
+            # 1️⃣ If I already have it locally (PRIMARY or REPLICA)
+            local = self.storage.query(key_id)
+            if local is not None:
+                return self.make_response(
+                    "OK",
+                    req_id=req_id,
+                    data={
+                        "result": local,
+                        "served_by": self.port
+                    }
+                )
 
+            # 2️⃣ If I am responsible but key not found
+            if self.is_responsible(key_id):
+                return self.make_response(
+                    "OK",
+                    req_id=req_id,
+                    data={
+                        "result": None,
+                        "served_by": self.port
+                    }
+                )
+
+            # 3️⃣ Otherwise forward
             return self.forward_to_successor(message)
         
                 # --- DELETE ---
         if msg_type == "DELETE":
-            key = data.get("key")
-            if key is None:
-                return self.make_response("ERROR", req_id=req_id, error="Missing key")
+           key = data.get("key")
+           if key is None:
+               return self.make_response("ERROR", req_id=req_id, error="Missing key")
 
-            key_id = sha1_int(key)
+           key_id = sha1_int(key)
 
-            if self.is_responsible(key_id):
-                self.storage.delete(key_id)
-                return self.make_response("OK", req_id=req_id, data={"deleted_from": self.port})
+           if self.is_responsible(key_id):
+               self.storage.delete(key_id)
 
-            return self.forward_to_successor(message)
+               replicas = self.get_replica_nodes()
+               for r in replicas:
+                   send_request(r["ip"], r["port"], {
+                       "type": "REPLICA_DELETE",
+                       "req_id": req_id,
+                       "origin": {"ip": self.ip, "port": self.port},
+                       "data": {"key_id": key_id}
+                   })
+
+               return self.make_response("OK", req_id=req_id, data={"deleted_from": self.port, "replicas": len(replicas)})
+
+           return self.forward_to_successor(message)
+
         
                 # --- QUERY ALL ("*") ---
         if msg_type == "QUERY_ALL":
@@ -451,6 +550,82 @@ class Node:
                     },
                 },
             )
+        
+        # --- REPLICA_PUT (store replica copy) ---
+        if msg_type == "REPLICA_PUT":
+            key_id = data.get("key_id")
+            key = data.get("key")
+            value = data.get("value")
+            primary = data.get("primary")
+            if key_id is None or key is None or value is None or primary is None:
+                return self.make_response("ERROR", req_id=req_id, error="Missing replica fields")
+
+            self.storage.put_replica(int(key_id), key, value, primary)
+            return self.make_response("OK", req_id=req_id, data={"replica_at": self.port})
+
+        # --- REPLICA_DELETE (delete replica copy) ---
+        if msg_type == "REPLICA_DELETE":
+            key_id = data.get("key_id")
+            if key_id is None:
+                return self.make_response("ERROR", req_id=req_id, error="Missing key_id")
+
+            self.storage.delete(int(key_id))
+            return self.make_response("OK", req_id=req_id, data={"replica_deleted_at": self.port})
+      
+        
+        # --- REPAIR_REPLICAS: re-push replicas for all PRIMARY keys ---
+        if msg_type == "REPAIR_REPLICAS":
+            primary_items = self.storage.get_primary_only()
+            replicas = self.get_replica_nodes()
+            primary_info = {"ip": self.ip, "port": self.port, "id": self.node_id}
+
+            pushed = 0
+            for key_id, rec in primary_items.items():
+                for r in replicas:
+                    send_request(r["ip"], r["port"], {
+                        "type": "REPLICA_PUT",
+                        "req_id": req_id,
+                        "origin": {"ip": self.ip, "port": self.port},
+                        "data": {
+                            "key_id": int(key_id),
+                            "key": rec["key"],
+                            "value": rec["value"],
+                            "primary": primary_info
+                        }
+                    })
+                    pushed += 1
+
+            return self.make_response("OK", req_id=req_id, data={"pushed": pushed})
+
+        # --- REPAIR_RING: walk ring and call REPAIR_REPLICAS on every node ---
+        if msg_type == "REPAIR_RING":
+            start_id = data.get("start_id")
+            if start_id is None:
+                return self.make_response("ERROR", req_id=req_id, error="Missing start_id")
+
+            # repair myself
+            self.handle_message({
+                "type": "REPAIR_REPLICAS",
+                "req_id": req_id,
+                "origin": message.get("origin"),
+                "data": {}
+            })
+
+            # stop condition
+            if self.successor["id"] == start_id:
+                return self.make_response("OK", req_id=req_id, data={"msg": "Repair completed"})
+
+            return send_request(
+                self.successor["ip"],
+                self.successor["port"],
+                { 
+                    "type": "REPAIR_RING",
+                    "req_id": req_id,
+                    "origin": message.get("origin"),
+                    "data": {"start_id": start_id},
+                },
+            )
+
 
         return self.make_response("UNKNOWN", req_id=req_id, data={"received_type": msg_type})
 
@@ -466,10 +641,11 @@ if __name__ == "__main__":
     parser.add_argument("--bootstrap-port", type=int, default=None)
     parser.add_argument("--overlay", action="store_true", help="Print ring topology")
     parser.add_argument("--depart", action="store_true", help="Gracefully leave the ring")
+    parser.add_argument("--k", type=int, default=1, help="Replication factor (primary + k-1 successors)")
 
     args = parser.parse_args()
 
-    node = Node(args.ip, args.port)
+    node = Node(args.ip, args.port, k=args.k)
     if args.overlay:
         result = send_request(
             args.ip,
@@ -582,6 +758,7 @@ if __name__ == "__main__":
 
             print(f"Joined ring (2-node). My pred={node.predecessor} "
                   f"succ={node.successor}")
+            
 
         # -------------------------
         # NORMAL JOIN CASE
@@ -649,7 +826,6 @@ if __name__ == "__main__":
 
             print(f"Joined ring. My pred={node.predecessor} "
                   f"succ={node.successor}")
-
     # -------------------------
     # Always start server
     # -------------------------

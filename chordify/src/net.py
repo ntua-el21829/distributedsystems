@@ -17,6 +17,7 @@ def _recv_exact(conn: socket.socket, n: int) -> bytes:
         bytes_recd += len(chunk)
     return b"".join(chunks)
 
+
 def recv_msg(conn: socket.socket) -> dict:
     """Receive one length-prefixed JSON message."""
     header = _recv_exact(conn, 4)
@@ -24,22 +25,27 @@ def recv_msg(conn: socket.socket) -> dict:
     payload = _recv_exact(conn, length)
     return json.loads(payload.decode("utf-8"))
 
+
 def send_msg(conn: socket.socket, message: dict) -> None:
     """Send one length-prefixed JSON message."""
     payload = json.dumps(message).encode("utf-8")
     header = struct.pack("!I", len(payload))
     conn.sendall(header + payload)
 
+
 # --- Client side ---
 
 def send_request(ip: str, port: int, message: dict, timeout: float = 3.0) -> dict:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout)
-    s.connect((ip, port))
-    send_msg(s, message)
-    response = recv_msg(s)
-    s.close()
-    return response
+    try:
+        s.connect((ip, port))
+        send_msg(s, message)
+        response = recv_msg(s)
+        return response
+    finally:
+        s.close()
+
 
 # --- Server side ---
 
@@ -51,9 +57,26 @@ def start_server(node, ip: str, port: int):
 
     print(f"Listening on {ip}:{port}")
 
+    # --- REPAIR AFTER START (only if replication enabled) ---
+    if getattr(node, "k", 1) > 1:
+        try:
+            node.handle_message({
+                "type": "REPAIR_RING",
+                "req_id": "repair_after_start",
+                "origin": {"ip": node.ip, "port": node.port},
+                "data": {"start_id": node.node_id},
+            })
+        except Exception as e:
+            print("Repair failed at startup:", e)
+
     while True:
         conn, addr = server.accept()
-        threading.Thread(target=handle_client, args=(node, conn), daemon=True).start()
+        threading.Thread(
+            target=handle_client,
+            args=(node, conn),
+            daemon=True
+        ).start()
+
 
 def handle_client(node, conn: socket.socket):
     try:
@@ -61,7 +84,6 @@ def handle_client(node, conn: socket.socket):
         response = node.handle_message(message)
         send_msg(conn, response)
     except Exception as e:
-        # Fail-safe response (μην “πεθάνει” ο server thread)
         try:
             send_msg(conn, {"status": "ERROR", "error": str(e)})
         except Exception:
