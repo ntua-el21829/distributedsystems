@@ -226,6 +226,95 @@ class Node:
                 req_id=req_id,
                 data={"successor": resp["data"]["successor"], "mode": "normal"},
             )
+                # --- INSERT ---
+        if msg_type == "INSERT":
+            key = data.get("key")
+            value = data.get("value")
+            if key is None or value is None:
+                return self.make_response("ERROR", req_id=req_id, error="Missing key or value")
+
+            key_id = sha1_int(key)
+
+            # If I am responsible -> store locally
+            if self.is_responsible(key_id):
+                self.storage.insert(key_id, key, value)
+                return self.make_response("OK", req_id=req_id, data={"stored_at": self.port})
+
+            # Otherwise forward
+            return self.forward_to_successor(message)
+        
+                # --- QUERY single key ---
+        if msg_type == "QUERY":
+            key = data.get("key")
+            if key is None:
+                return self.make_response("ERROR", req_id=req_id, error="Missing key")
+
+            # Special case: query "*"
+            if key == "*":
+                return send_request(
+                    self.successor["ip"],
+                    self.successor["port"],
+                    {
+                        "type": "QUERY_ALL",
+                        "req_id": req_id,
+                        "origin": {"ip": self.ip, "port": self.port},
+                        "data": {
+                            "start_id": self.node_id,
+                            "acc": {f"{self.ip}:{self.port}": self.storage.get_all()}
+                        }
+                    }
+                )
+
+            key_id = sha1_int(key)
+
+            if self.is_responsible(key_id):
+                result = self.storage.query(key_id)
+                return self.make_response("OK", req_id=req_id, data={"result": result})
+
+            return self.forward_to_successor(message)
+        
+                # --- DELETE ---
+        if msg_type == "DELETE":
+            key = data.get("key")
+            if key is None:
+                return self.make_response("ERROR", req_id=req_id, error="Missing key")
+
+            key_id = sha1_int(key)
+
+            if self.is_responsible(key_id):
+                self.storage.delete(key_id)
+                return self.make_response("OK", req_id=req_id, data={"deleted_from": self.port})
+
+            return self.forward_to_successor(message)
+        
+                # --- QUERY ALL ("*") ---
+        if msg_type == "QUERY_ALL":
+            start_id = data.get("start_id")
+            acc = data.get("acc", {})
+
+            # Add my local data
+            acc[f"{self.ip}:{self.port}"] = self.storage.get_all()
+
+            # If successor is the originator, stop
+            if self.successor["id"] == start_id:
+                return self.make_response("OK", req_id=req_id, data={"result": acc})
+
+            # Otherwise forward
+            return send_request(
+                self.successor["ip"],
+                self.successor["port"],
+                {
+                    "type": "QUERY_ALL",
+                    "req_id": req_id,
+                    "origin": message.get("origin"),
+                    "data": {
+                        "start_id": start_id,
+                        "acc": acc
+                    }
+                }
+            )
+        
+        
 
         return self.make_response("UNKNOWN", req_id=req_id, data={"received_type": msg_type})
 
