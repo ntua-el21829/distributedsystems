@@ -37,7 +37,95 @@ class Node:
     def set_predecessor(self, node_info: dict) -> None:
         self.predecessor = node_info
 
+    def graceful_depart(self):
+       self._do_depart()
 
+
+      # --- Internal depart logic (business logic) ---
+    def _do_depart(self):
+       # If single node
+       if self.successor["id"] == self.node_id and self.predecessor["id"] == self.node_id:
+           return
+
+       succ = self.successor
+       pred = self.predecessor
+
+       # 1) Transfer all local keys to successor
+       all_local = self.storage.get_all()
+       items = []
+       for key_id, rec in all_local.items():
+           items.append({
+               "key_id": int(key_id),
+               "key": rec["key"],
+               "value": rec["value"]
+           })
+
+       if items:
+           send_request(
+               succ["ip"],
+               succ["port"],
+               {
+                   "type": "BULK_INSERT",
+                   "req_id": "depart_transfer",
+                   "origin": {"ip": self.ip, "port": self.port},
+                   "data": {"items": items}
+               }
+           )
+
+       # 2) Fix pointers
+       send_request(
+           pred["ip"],
+           pred["port"],
+           {
+               "type": "SET_SUCCESSOR",
+               "req_id": "depart_rewire",
+               "origin": {"ip": self.ip, "port": self.port},
+               "data": {"node": succ}
+           }
+       )
+
+       send_request(
+           succ["ip"],
+           succ["port"],
+           {
+               "type": "SET_PREDECESSOR",
+               "req_id": "depart_rewire",
+               "origin": {"ip": self.ip, "port": self.port},
+               "data": {"node": pred}
+           }
+       )
+
+    def get_overlay(self):
+        # If single node
+        if self.successor["id"] == self.node_id:
+            return {
+                "status": "OK",
+                "data": {
+                    "ring": [{
+                        "id": self.node_id,
+                        "ip": self.ip,
+                        "port": self.port
+                    }]
+                }
+            }
+
+        return send_request(
+            self.successor["ip"],
+            self.successor["port"],
+            {
+                "type": "OVERLAY",
+                "req_id": "overlay",
+                "origin": {"ip": self.ip, "port": self.port},
+                "data": {
+                    "start_id": self.node_id,
+                    "acc": [{
+                        "id": self.node_id,
+                        "ip": self.ip,
+                        "port": self.port
+                    }]
+                }
+            }
+        )
 
     # --- Message helpers ---
 
@@ -146,6 +234,8 @@ class Node:
                # Remove moved keys locally
                for kid in to_delete:
                    self.storage.delete(kid)
+
+            
 
            return self.make_response("OK", req_id=req_id, data={"moved": len(to_move)})
 
@@ -314,7 +404,38 @@ class Node:
                 }
             )
         
-        
+          # --- DEPART (graceful) ---
+        if msg_type == "DEPART":
+           self._do_depart()
+           return self.make_response("OK", req_id=req_id, data={"msg": "Depart completed"})
+
+                # --- OVERLAY ---
+        if msg_type == "OVERLAY":
+            start_id = data.get("start_id")
+            acc = data.get("acc", [])
+
+            acc.append({
+                "id": self.node_id,
+                "ip": self.ip,
+                "port": self.port
+            })
+
+            if self.successor["id"] == start_id:
+                return self.make_response("OK", req_id=req_id, data={"ring": acc})
+
+            return send_request(
+                self.successor["ip"],
+                self.successor["port"],
+                {
+                    "type": "OVERLAY",
+                    "req_id": req_id,
+                    "origin": message.get("origin"),
+                    "data": {
+                        "start_id": start_id,
+                        "acc": acc
+                    }
+                }
+            )
 
         return self.make_response("UNKNOWN", req_id=req_id, data={"received_type": msg_type})
 
@@ -328,11 +449,42 @@ if __name__ == "__main__":
                         help="Run as bootstrap node")
     parser.add_argument("--bootstrap-ip", default="127.0.0.1")
     parser.add_argument("--bootstrap-port", type=int, default=None)
+    parser.add_argument("--overlay", action="store_true", help="Print ring topology")
+    parser.add_argument("--depart", action="store_true", help="Gracefully leave the ring")
 
     args = parser.parse_args()
 
     node = Node(args.ip, args.port)
+    if args.overlay:
+        result = send_request(
+            args.ip,
+            args.port,
+            {
+                "type": "OVERLAY",
+                "req_id": "overlay_cli",
+                "origin": {"ip": args.ip, "port": args.port},
+                "data": {
+                    "start_id": node.node_id,
+                "acc": []
+                }
+            }
+        )
+        print(result)
+        raise SystemExit(0)
 
+    if args.depart:
+        result = send_request(
+            args.ip,
+            args.port,
+            {
+                "type": "DEPART",
+                "req_id": "depart_cli",
+                "origin": {"ip": args.ip, "port": args.port},
+                "data": {}
+            }
+        )
+        print(result)
+        raise SystemExit(0)
     # -------------------------
     # JOIN LOGIC (non-bootstrap)
     # -------------------------
