@@ -1,21 +1,32 @@
 import argparse
-from email import message
 from email.mime import message
-from itertools import chain
 from itertools import chain
 import uuid
 
-from hashing import sha1_int, in_interval
+from hashing import sha1_int, in_interval, in_open_interval, MAX_ID
 from storage import Storage
 from net import start_server, send_request
 
 
 class Node:
-    def __init__(self, ip: str, port: int, k: int = 1, consistency: str = "eventual"):
+    def __init__(
+        self,
+        ip: str,
+        port: int,
+        k: int = 1,
+        consistency: str = "eventual",
+        use_fingers: bool = False,
+        m: int = 160,
+    ):
         self.k = max(1, int(k))
         self.ip = ip
         self.port = port
         self.consistency = consistency
+
+        self.use_fingers = use_fingers
+        self.m = m
+        self.finger = [dict(self.successor) for _ in range(self.m)]
+        self.next_finger_to_fix = 0
 
         # Node ID = SHA1(ip:port)
         self.node_id = sha1_int(f"{ip}:{port}")
@@ -30,6 +41,9 @@ class Node:
     # --- Ring logic ---
 
     def is_responsible(self, key_id: int) -> bool:
+        # single-node ring: responsible for everything
+        if self.predecessor["id"] == self.node_id:
+            return True
         return in_interval(key_id, self.predecessor["id"], self.node_id)
 
     def forward_to_successor(self, message: dict) -> dict:
@@ -123,6 +137,139 @@ class Node:
                 },
             },
         )
+
+    def get_ring(self) -> list[dict]:
+        # single node
+        if (
+            self.successor["id"] == self.node_id
+            and self.predecessor["id"] == self.node_id
+        ):
+            return [{"ip": self.ip, "port": self.port, "id": self.node_id}]
+
+        resp = self.handle_message(
+            {
+                "type": "OVERLAY",
+                "req_id": "overlay_for_fingers",
+                "origin": {"ip": self.ip, "port": self.port},
+                "data": {"start_id": self.node_id, "acc": []},
+            }
+        )
+
+        if resp.get("status") != "OK":
+            return []
+
+        return resp["data"]["ring"]
+
+    def successor_of_id_in_ring(self, ring: list[dict], target_id: int) -> dict:
+        if not ring:
+            return self.successor
+
+        sorted_ring = sorted(ring, key=lambda n: n["id"])
+
+        for n in sorted_ring:
+            if n["id"] >= target_id:
+                return {"ip": n["ip"], "port": n["port"], "id": n["id"]}
+
+        # wrap-around
+        first = sorted_ring[0]
+        return {"ip": first["ip"], "port": first["port"], "id": first["id"]}
+
+    def fix_fingers(self):
+        if not self.use_fingers:
+            return
+
+        i = self.next_finger_to_fix
+        self.next_finger_to_fix = (self.next_finger_to_fix + 1) % self.m
+
+        target_id = (self.node_id + (1 << i)) % MAX_ID
+
+        resp = self.handle_message(
+            {
+                "type": "FIND_SUCCESSOR",
+                "req_id": f"fix_{self.port}_{i}",
+                "origin": {"ip": self.ip, "port": self.port},
+                "data": {"id": target_id, "ttl": 32},
+            }
+        )
+
+        if resp.get("status") == "OK":
+            self.finger[i] = resp["data"]["successor"]
+
+    def build_finger_table(self) -> None:
+        if not self.use_fingers:
+            self.finger = []
+            return
+
+        ring = self.get_ring()
+        if not ring:
+            self.finger = []
+            return
+
+        new_fingers = []
+
+        for i in range(self.m):
+            start = (self.node_id + (1 << i)) % MAX_ID
+            succ = self.successor_of_id_in_ring(ring, start)
+            new_fingers.append(succ)
+
+        self.finger = new_fingers
+
+    def forward_with_ttl(self, message: dict, target_id: int) -> dict:
+        # Clone message (μην κάνεις mutate το original)
+        new_msg = dict(message)
+        new_msg["data"] = dict(message.get("data", {}))
+
+        ttl = new_msg["data"].get("ttl", 32)
+
+        if ttl <= 0:
+            # fallback σε successor
+            return send_request(
+                self.successor["ip"],
+                self.successor["port"],
+                new_msg,
+            )
+
+        new_msg["data"]["ttl"] = ttl - 1
+
+        # Finger-based επιλογή
+        next_node = self.closest_preceding_node(target_id)
+
+        return send_request(
+            next_node["ip"],
+            next_node["port"],
+            new_msg,
+        )
+
+    def closest_preceding_node(self, target_id: int) -> dict:
+
+        # Guard 1: αν δεν χρησιμοποιούμε fingers
+        if not self.use_fingers or not self.finger:
+            return self.successor
+
+        # Guard 2: αν ψάχνουμε τον εαυτό μας
+        if target_id == self.node_id:
+            return self.successor
+
+        # Σάρωση από high -> low (Chord rule)
+        for i in range(self.m - 1, -1, -1):
+            f = self.finger[i]
+
+            # Robustness guard
+            if not f or "id" not in f:
+                continue
+
+            fid = f["id"]
+
+            # Μην επιστρέψεις εσένα
+            if fid == self.node_id:
+                continue
+
+            # Strict open interval (self, target)
+            if in_open_interval(fid, self.node_id, target_id, MAX_ID):
+                return f
+
+        # Fallback
+        return self.successor
 
     # --- Message helpers ---
 
@@ -232,6 +379,11 @@ class Node:
                     "successor": self.successor,
                     "predecessor": self.predecessor,
                 },
+            )
+
+        if msg_type == "FINGERS":
+            return self.make_response(
+                "OK", req_id=req_id, data={"fingers": self.finger}
             )
 
         # --- Bulk insert (used for key transfers / future replication) ---
@@ -350,8 +502,8 @@ class Node:
                     "OK", req_id=req_id, data={"successor": self.successor}
                 )
 
-            # Otherwise forward to successor
-            return self.forward_to_successor(message)
+            # Otherwise
+            return self.forward_with_ttl(message, target_id=target_id)
 
         if msg_type == "JOIN_REQUEST":
             new_node = data.get("new_node")
@@ -416,7 +568,10 @@ class Node:
 
             # Linear mode: ensure request reaches PRIMARY first
             if self.consistency == "linear" and not self.is_responsible(key_id):
-                return self.forward_to_successor(message)
+                if self.use_fingers:
+                    return self.forward_with_ttl(message, target_id=key_id)
+                else:
+                    return self.forward_to_successor(message)
 
             # If I am responsible (PRIMARY)
             if self.is_responsible(key_id):
@@ -582,7 +737,10 @@ class Node:
                     data={"result": None, "served_by": self.port},
                 )
 
-            return self.forward_to_successor(message)
+            if self.use_fingers:
+                return self.forward_with_ttl(message, key_id)
+            else:
+                return self.forward_to_successor(message)
 
         # --- DELETE ---
         if msg_type == "DELETE":
@@ -649,7 +807,10 @@ class Node:
                     data={"deleted_from": self.port, "replicas": len(replicas)},
                 )
 
-            return self.forward_to_successor(message)
+            if self.use_fingers:
+                return self.forward_with_ttl(message, key_id)
+            else:
+                return self.forward_to_successor(message)
 
             # --- QUERY ALL ("*") ---
         if msg_type == "QUERY_ALL":
@@ -911,12 +1072,16 @@ if __name__ == "__main__":
     parser.add_argument("--ip", default="127.0.0.1")
     parser.add_argument("--port", type=int, required=True)
 
-    parser.add_argument("--bootstrap", action="store_true", help="Run as bootstrap node")
+    parser.add_argument(
+        "--bootstrap", action="store_true", help="Run as bootstrap node"
+    )
     parser.add_argument("--bootstrap-ip", default="127.0.0.1")
     parser.add_argument("--bootstrap-port", type=int, default=None)
 
     parser.add_argument("--overlay", action="store_true", help="Print ring topology")
-    parser.add_argument("--depart", action="store_true", help="Gracefully leave the ring")
+    parser.add_argument(
+        "--depart", action="store_true", help="Gracefully leave the ring"
+    )
 
     parser.add_argument(
         "--k",
@@ -924,13 +1089,17 @@ if __name__ == "__main__":
         default=1,
         help="Replication factor (primary + k-1 successors)",
     )
-    parser.add_argument("--consistency", choices=["eventual", "linear"], default="eventual")
+    parser.add_argument(
+        "--consistency", choices=["eventual", "linear"], default="eventual"
+    )
 
     parser.add_argument(
         "--repair-after-join",
         action="store_true",
         help="After successful join, ask bootstrap to rebuild replicas (REPAIR_RING)",
     )
+    parser.add_argument("--use-fingers", action="store_true")
+    parser.add_argument("--m", type=int, default=16)
 
     args = parser.parse_args()
 
@@ -1002,6 +1171,9 @@ if __name__ == "__main__":
 
         # After a topology change, rebuild replicas if possible
         maybe_repair_ring("after_depart")
+        if args.use_fingers:
+            node.build_finger_table()
+
         raise SystemExit(0)
 
     # -------------------------
@@ -1019,7 +1191,9 @@ if __name__ == "__main__":
                 "type": "JOIN_REQUEST",
                 "req_id": "join_" + str(args.port),
                 "origin": {"ip": args.ip, "port": args.port},
-                "data": {"new_node": {"ip": node.ip, "port": node.port, "id": node.node_id}},
+                "data": {
+                    "new_node": {"ip": node.ip, "port": node.port, "id": node.node_id}
+                },
             },
         )
 
@@ -1041,7 +1215,9 @@ if __name__ == "__main__":
                     "type": "SET_SUCCESSOR",
                     "req_id": "set_succ_" + str(args.port),
                     "origin": {"ip": args.ip, "port": args.port},
-                    "data": {"node": {"ip": node.ip, "port": node.port, "id": node.node_id}},
+                    "data": {
+                        "node": {"ip": node.ip, "port": node.port, "id": node.node_id}
+                    },
                 },
             )
 
@@ -1052,7 +1228,9 @@ if __name__ == "__main__":
                     "type": "SET_PREDECESSOR",
                     "req_id": "set_pred_" + str(args.port),
                     "origin": {"ip": args.ip, "port": args.port},
-                    "data": {"node": {"ip": node.ip, "port": node.port, "id": node.node_id}},
+                    "data": {
+                        "node": {"ip": node.ip, "port": node.port, "id": node.node_id}
+                    },
                 },
             )
 
@@ -1063,11 +1241,19 @@ if __name__ == "__main__":
                     "type": "TRANSFER_KEYS",
                     "req_id": "xfer_" + str(args.port),
                     "origin": {"ip": args.ip, "port": args.port},
-                    "data": {"new_node": {"ip": node.ip, "port": node.port, "id": node.node_id}},
+                    "data": {
+                        "new_node": {
+                            "ip": node.ip,
+                            "port": node.port,
+                            "id": node.node_id,
+                        }
+                    },
                 },
             )
 
-            print(f"Joined ring (2-node). My pred={node.predecessor} succ={node.successor}")
+            print(
+                f"Joined ring (2-node). My pred={node.predecessor} succ={node.successor}"
+            )
 
         # normal join
         else:
@@ -1098,7 +1284,9 @@ if __name__ == "__main__":
                     "type": "SET_PREDECESSOR",
                     "req_id": "set_pred_succ_" + str(args.port),
                     "origin": {"ip": args.ip, "port": args.port},
-                    "data": {"node": {"ip": node.ip, "port": node.port, "id": node.node_id}},
+                    "data": {
+                        "node": {"ip": node.ip, "port": node.port, "id": node.node_id}
+                    },
                 },
             )
 
@@ -1109,7 +1297,9 @@ if __name__ == "__main__":
                     "type": "SET_SUCCESSOR",
                     "req_id": "set_succ_pred_" + str(args.port),
                     "origin": {"ip": args.ip, "port": args.port},
-                    "data": {"node": {"ip": node.ip, "port": node.port, "id": node.node_id}},
+                    "data": {
+                        "node": {"ip": node.ip, "port": node.port, "id": node.node_id}
+                    },
                 },
             )
 
@@ -1120,7 +1310,13 @@ if __name__ == "__main__":
                     "type": "TRANSFER_KEYS",
                     "req_id": "xfer_" + str(args.port),
                     "origin": {"ip": args.ip, "port": args.port},
-                    "data": {"new_node": {"ip": node.ip, "port": node.port, "id": node.node_id}},
+                    "data": {
+                        "new_node": {
+                            "ip": node.ip,
+                            "port": node.port,
+                            "id": node.node_id,
+                        }
+                    },
                 },
             )
 
@@ -1129,6 +1325,9 @@ if __name__ == "__main__":
         # After join, rebuild replicas if requested
         if args.repair_after_join:
             maybe_repair_ring("after_join")
+
+        if args.use_fingers:
+            node.build_finger_table()
 
     # -------------------------
     # Always start server
