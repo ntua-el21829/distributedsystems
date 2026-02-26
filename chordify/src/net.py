@@ -5,6 +5,7 @@ import struct
 
 # --- Framing helpers: 4-byte length prefix (big endian) ---
 
+
 def _recv_exact(conn: socket.socket, n: int) -> bytes:
     """Receive exactly n bytes or raise ConnectionError."""
     chunks = []
@@ -35,6 +36,7 @@ def send_msg(conn: socket.socket, message: dict) -> None:
 
 # --- Client side ---
 
+
 def send_request(ip: str, port: int, message: dict, timeout: float = 3.0) -> dict:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout)
@@ -49,6 +51,7 @@ def send_request(ip: str, port: int, message: dict, timeout: float = 3.0) -> dic
 
 # --- Server side ---
 
+
 def start_server(node, ip: str, port: int):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -57,14 +60,9 @@ def start_server(node, ip: str, port: int):
 
     print(f"Listening on {ip}:{port}")
 
-
     while True:
         conn, addr = server.accept()
-        threading.Thread(
-            target=handle_client,
-            args=(node, conn),
-            daemon=True
-        ).start()
+        threading.Thread(target=handle_client, args=(node, conn), daemon=True).start()
 
 
 def handle_client(node, conn: socket.socket):

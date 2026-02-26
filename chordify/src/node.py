@@ -911,25 +911,67 @@ if __name__ == "__main__":
     parser.add_argument("--ip", default="127.0.0.1")
     parser.add_argument("--port", type=int, required=True)
 
-    parser.add_argument(
-        "--bootstrap", action="store_true", help="Run as bootstrap node"
-    )
+    parser.add_argument("--bootstrap", action="store_true", help="Run as bootstrap node")
     parser.add_argument("--bootstrap-ip", default="127.0.0.1")
     parser.add_argument("--bootstrap-port", type=int, default=None)
+
     parser.add_argument("--overlay", action="store_true", help="Print ring topology")
+    parser.add_argument("--depart", action="store_true", help="Gracefully leave the ring")
+
     parser.add_argument(
-        "--depart", action="store_true", help="Gracefully leave the ring"
+        "--k",
+        type=int,
+        default=1,
+        help="Replication factor (primary + k-1 successors)",
     )
+    parser.add_argument("--consistency", choices=["eventual", "linear"], default="eventual")
+
     parser.add_argument(
-        "--k", type=int, default=1, help="Replication factor (primary + k-1 successors)"
-    )
-    parser.add_argument(
-        "--consistency", choices=["eventual", "linear"], default="eventual"
+        "--repair-after-join",
+        action="store_true",
+        help="After successful join, ask bootstrap to rebuild replicas (REPAIR_RING)",
     )
 
     args = parser.parse_args()
 
     node = Node(args.ip, args.port, k=args.k, consistency=args.consistency)
+
+    def get_node_id(ip: str, port: int) -> int:
+        ping = send_request(
+            ip,
+            port,
+            {
+                "type": "PING",
+                "req_id": f"ping_{port}",
+                "origin": {"ip": args.ip, "port": args.port},
+                "data": {},
+            },
+        )
+        if ping.get("status") != "OK":
+            raise RuntimeError(f"PING failed for {ip}:{port}: {ping}")
+        return ping["data"]["node_id"]
+
+    def maybe_repair_ring(tag: str) -> None:
+        # Needs bootstrap info; if missing, do nothing
+        if args.bootstrap_port is None:
+            return
+        try:
+            bs_id = get_node_id(args.bootstrap_ip, args.bootstrap_port)
+            rep = send_request(
+                args.bootstrap_ip,
+                args.bootstrap_port,
+                {
+                    "type": "REPAIR_RING",
+                    "req_id": f"repair_{tag}_{args.port}",
+                    "origin": {"ip": args.ip, "port": args.port},
+                    "data": {"start_id": bs_id},
+                },
+            )
+            print("REPAIR_RING:", rep)
+        except Exception as e:
+            print("REPAIR_RING failed:", e)
+
+    # ---- overlay CLI ----
     if args.overlay:
         result = send_request(
             args.ip,
@@ -944,6 +986,7 @@ if __name__ == "__main__":
         print(result)
         raise SystemExit(0)
 
+    # ---- depart CLI ----
     if args.depart:
         result = send_request(
             args.ip,
@@ -956,7 +999,11 @@ if __name__ == "__main__":
             },
         )
         print(result)
+
+        # After a topology change, rebuild replicas if possible
+        maybe_repair_ring("after_depart")
         raise SystemExit(0)
+
     # -------------------------
     # JOIN LOGIC (non-bootstrap)
     # -------------------------
@@ -965,7 +1012,6 @@ if __name__ == "__main__":
             print("ERROR: Non-bootstrap node needs --bootstrap-port")
             raise SystemExit(1)
 
-        # 1) Send JOIN_REQUEST to bootstrap
         join_resp = send_request(
             args.bootstrap_ip,
             args.bootstrap_port,
@@ -973,9 +1019,7 @@ if __name__ == "__main__":
                 "type": "JOIN_REQUEST",
                 "req_id": "join_" + str(args.port),
                 "origin": {"ip": args.ip, "port": args.port},
-                "data": {
-                    "new_node": {"ip": node.ip, "port": node.port, "id": node.node_id}
-                },
+                "data": {"new_node": {"ip": node.ip, "port": node.port, "id": node.node_id}},
             },
         )
 
@@ -985,14 +1029,11 @@ if __name__ == "__main__":
 
         mode = join_resp["data"].get("mode")
 
-        # -------------------------
-        # 2-NODE RING CASE
-        # -------------------------
+        # 2-node ring bootstrap shortcut
         if mode == "two_node_bootstrap":
             node.successor = join_resp["data"]["successor"]
             node.predecessor = join_resp["data"]["predecessor"]
 
-            # Tell bootstrap to update pointers to me
             send_request(
                 args.bootstrap_ip,
                 args.bootstrap_port,
@@ -1000,9 +1041,7 @@ if __name__ == "__main__":
                     "type": "SET_SUCCESSOR",
                     "req_id": "set_succ_" + str(args.port),
                     "origin": {"ip": args.ip, "port": args.port},
-                    "data": {
-                        "node": {"ip": node.ip, "port": node.port, "id": node.node_id}
-                    },
+                    "data": {"node": {"ip": node.ip, "port": node.port, "id": node.node_id}},
                 },
             )
 
@@ -1013,13 +1052,10 @@ if __name__ == "__main__":
                     "type": "SET_PREDECESSOR",
                     "req_id": "set_pred_" + str(args.port),
                     "origin": {"ip": args.ip, "port": args.port},
-                    "data": {
-                        "node": {"ip": node.ip, "port": node.port, "id": node.node_id}
-                    },
+                    "data": {"node": {"ip": node.ip, "port": node.port, "id": node.node_id}},
                 },
             )
 
-            # Ask successor (bootstrap) to transfer keys
             send_request(
                 node.successor["ip"],
                 node.successor["port"],
@@ -1027,29 +1063,17 @@ if __name__ == "__main__":
                     "type": "TRANSFER_KEYS",
                     "req_id": "xfer_" + str(args.port),
                     "origin": {"ip": args.ip, "port": args.port},
-                    "data": {
-                        "new_node": {
-                            "ip": node.ip,
-                            "port": node.port,
-                            "id": node.node_id,
-                        }
-                    },
+                    "data": {"new_node": {"ip": node.ip, "port": node.port, "id": node.node_id}},
                 },
             )
 
-            print(
-                f"Joined ring (2-node). My pred={node.predecessor} "
-                f"succ={node.successor}"
-            )
+            print(f"Joined ring (2-node). My pred={node.predecessor} succ={node.successor}")
 
-        # -------------------------
-        # NORMAL JOIN CASE
-        # -------------------------
+        # normal join
         else:
             succ = join_resp["data"]["successor"]
             node.successor = succ
 
-            # 2) Ask successor for its predecessor
             pred_resp = send_request(
                 succ["ip"],
                 succ["port"],
@@ -1060,7 +1084,6 @@ if __name__ == "__main__":
                     "data": {},
                 },
             )
-
             if pred_resp.get("status") != "OK":
                 print("GET_PREDECESSOR failed:", pred_resp)
                 raise SystemExit(1)
@@ -1068,7 +1091,6 @@ if __name__ == "__main__":
             pred = pred_resp["data"]["predecessor"]
             node.predecessor = pred
 
-            # 3) Tell successor to set predecessor = me
             send_request(
                 succ["ip"],
                 succ["port"],
@@ -1076,13 +1098,10 @@ if __name__ == "__main__":
                     "type": "SET_PREDECESSOR",
                     "req_id": "set_pred_succ_" + str(args.port),
                     "origin": {"ip": args.ip, "port": args.port},
-                    "data": {
-                        "node": {"ip": node.ip, "port": node.port, "id": node.node_id}
-                    },
+                    "data": {"node": {"ip": node.ip, "port": node.port, "id": node.node_id}},
                 },
             )
 
-            # 4) Tell predecessor to set successor = me
             send_request(
                 pred["ip"],
                 pred["port"],
@@ -1090,13 +1109,10 @@ if __name__ == "__main__":
                     "type": "SET_SUCCESSOR",
                     "req_id": "set_succ_pred_" + str(args.port),
                     "origin": {"ip": args.ip, "port": args.port},
-                    "data": {
-                        "node": {"ip": node.ip, "port": node.port, "id": node.node_id}
-                    },
+                    "data": {"node": {"ip": node.ip, "port": node.port, "id": node.node_id}},
                 },
             )
 
-            # 5) Ask successor to transfer keys that now belong to me
             send_request(
                 succ["ip"],
                 succ["port"],
@@ -1104,17 +1120,16 @@ if __name__ == "__main__":
                     "type": "TRANSFER_KEYS",
                     "req_id": "xfer_" + str(args.port),
                     "origin": {"ip": args.ip, "port": args.port},
-                    "data": {
-                        "new_node": {
-                            "ip": node.ip,
-                            "port": node.port,
-                            "id": node.node_id,
-                        }
-                    },
+                    "data": {"new_node": {"ip": node.ip, "port": node.port, "id": node.node_id}},
                 },
             )
 
-            print(f"Joined ring. My pred={node.predecessor} " f"succ={node.successor}")
+            print(f"Joined ring. My pred={node.predecessor} succ={node.successor}")
+
+        # After join, rebuild replicas if requested
+        if args.repair_after_join:
+            maybe_repair_ring("after_join")
+
     # -------------------------
     # Always start server
     # -------------------------
