@@ -58,7 +58,7 @@ class Node:
         pred = self.predecessor
 
         # 1) Transfer all local keys to successor
-        all_local = self.storage.get_all()
+        all_local = self.storage.get_primary_only()
         items = []
         for key_id, rec in all_local.items():
             items.append(
@@ -259,7 +259,7 @@ class Node:
             left = self.predecessor["id"]
             right = new_id
 
-            all_local = self.storage.get_all()
+            all_local = self.storage.get_primary_only()
             to_move = []
             to_delete = []
 
