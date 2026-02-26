@@ -16,17 +16,12 @@ class Node:
         k: int = 1,
         consistency: str = "eventual",
         use_fingers: bool = False,
-        m: int = 160,
+        m: int = 16,
     ):
         self.k = max(1, int(k))
         self.ip = ip
         self.port = port
         self.consistency = consistency
-
-        self.use_fingers = use_fingers
-        self.m = m
-        self.finger = [dict(self.successor) for _ in range(self.m)]
-        self.next_finger_to_fix = 0
 
         # Node ID = SHA1(ip:port)
         self.node_id = sha1_int(f"{ip}:{port}")
@@ -34,6 +29,11 @@ class Node:
         # Chord pointers (initially self)
         self.successor = {"ip": ip, "port": port, "id": self.node_id}
         self.predecessor = {"ip": ip, "port": port, "id": self.node_id}
+
+        self.use_fingers = use_fingers
+        self.m = m
+        self.finger = [dict(self.successor) for _ in range(self.m)]
+        self.next_finger_to_fix = 0
 
         # Local storage (thread-safe)
         self.storage = Storage()
@@ -234,11 +234,16 @@ class Node:
         # Finger-based επιλογή
         next_node = self.closest_preceding_node(target_id)
 
+        if next_node["id"] == self.node_id:
+            next_node = self.successor
+
         return send_request(
             next_node["ip"],
             next_node["port"],
             new_msg,
         )
+
+        print("FINGER FORWARD from", self.port, "to", next_node["port"])
 
     def closest_preceding_node(self, target_id: int) -> dict:
 
@@ -1103,7 +1108,14 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    node = Node(args.ip, args.port, k=args.k, consistency=args.consistency)
+    node = Node(
+        args.ip,
+        args.port,
+        k=args.k,
+        consistency=args.consistency,
+        use_fingers=args.use_fingers,
+        m=args.m,
+    )
 
     def get_node_id(ip: str, port: int) -> int:
         ping = send_request(
