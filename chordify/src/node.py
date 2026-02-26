@@ -1,6 +1,8 @@
 import argparse
 from email import message
 from email.mime import message
+from itertools import chain
+from itertools import chain
 import uuid
 
 from hashing import sha1_int, in_interval
@@ -9,10 +11,11 @@ from net import start_server, send_request
 
 
 class Node:
-    def __init__(self, ip: str, port: int, k: int = 1):
+    def __init__(self, ip: str, port: int, k: int = 1, consistency: str = "eventual"):
         self.k = max(1, int(k))
         self.ip = ip
         self.port = port
+        self.consistency = consistency
 
         # Node ID = SHA1(ip:port)
         self.node_id = sha1_int(f"{ip}:{port}")
@@ -23,9 +26,8 @@ class Node:
 
         # Local storage (thread-safe)
         self.storage = Storage()
-    
-   
-   # --- Ring logic ---
+
+    # --- Ring logic ---
 
     def is_responsible(self, key_id: int) -> bool:
         return in_interval(key_id, self.predecessor["id"], self.node_id)
@@ -41,62 +43,62 @@ class Node:
         self.predecessor = node_info
 
     def graceful_depart(self):
-       self._do_depart()
+        self._do_depart()
 
-
-      # --- Internal depart logic (business logic) ---
+    # --- Internal depart logic (business logic) ---
     def _do_depart(self):
-       # If single node
-       if self.successor["id"] == self.node_id and self.predecessor["id"] == self.node_id:
-           return
+        # If single node
+        if (
+            self.successor["id"] == self.node_id
+            and self.predecessor["id"] == self.node_id
+        ):
+            return
 
-       succ = self.successor
-       pred = self.predecessor
+        succ = self.successor
+        pred = self.predecessor
 
-       # 1) Transfer all local keys to successor
-       all_local = self.storage.get_all()
-       items = []
-       for key_id, rec in all_local.items():
-           items.append({
-               "key_id": int(key_id),
-               "key": rec["key"],
-               "value": rec["value"]
-           })
+        # 1) Transfer all local keys to successor
+        all_local = self.storage.get_all()
+        items = []
+        for key_id, rec in all_local.items():
+            items.append(
+                {"key_id": int(key_id), "key": rec["key"], "value": rec["value"]}
+            )
 
-       if items:
-           send_request(
-               succ["ip"],
-               succ["port"],
-               {
-                   "type": "BULK_INSERT",
-                   "req_id": "depart_transfer",
-                   "origin": {"ip": self.ip, "port": self.port},
-                   "data": {"items": items}
-               }
-           )
+        if items:
+            send_request(
+                succ["ip"],
+                succ["port"],
+                {
+                    "type": "BULK_INSERT",
+                    "req_id": "depart_transfer",
+                    "origin": {"ip": self.ip, "port": self.port},
+                    "data": {"items": items},
+                },
+            )
 
-       # 2) Fix pointers
-       send_request(
-           pred["ip"],
-           pred["port"],
-           {
-               "type": "SET_SUCCESSOR",
-               "req_id": "depart_rewire",
-               "origin": {"ip": self.ip, "port": self.port},
-               "data": {"node": succ}
-           }
-       )
+        # 2) Fix pointers
+        send_request(
+            pred["ip"],
+            pred["port"],
+            {
+                "type": "SET_SUCCESSOR",
+                "req_id": "depart_rewire",
+                "origin": {"ip": self.ip, "port": self.port},
+                "data": {"node": succ},
+            },
+        )
 
-       send_request(
-           succ["ip"],
-           succ["port"],
-           {
-               "type": "SET_PREDECESSOR",
-               "req_id": "depart_rewire",
-               "origin": {"ip": self.ip, "port": self.port},
-               "data": {"node": pred}
-           }
-       )
+        send_request(
+            succ["ip"],
+            succ["port"],
+            {
+                "type": "SET_PREDECESSOR",
+                "req_id": "depart_rewire",
+                "origin": {"ip": self.ip, "port": self.port},
+                "data": {"node": pred},
+            },
+        )
 
     def get_overlay(self):
         # If single node
@@ -104,12 +106,8 @@ class Node:
             return {
                 "status": "OK",
                 "data": {
-                    "ring": [{
-                        "id": self.node_id,
-                        "ip": self.ip,
-                        "port": self.port
-                    }]
-                }
+                    "ring": [{"id": self.node_id, "ip": self.ip, "port": self.port}]
+                },
             }
 
         return send_request(
@@ -121,18 +119,16 @@ class Node:
                 "origin": {"ip": self.ip, "port": self.port},
                 "data": {
                     "start_id": self.node_id,
-                    "acc": [{
-                        "id": self.node_id,
-                        "ip": self.ip,
-                        "port": self.port
-                    }]
-                }
-            }
+                    "acc": [{"id": self.node_id, "ip": self.ip, "port": self.port}],
+                },
+            },
         )
 
     # --- Message helpers ---
 
-    def make_msg(self, msg_type: str, data: dict | None = None, req_id: str | None = None) -> dict:
+    def make_msg(
+        self, msg_type: str, data: dict | None = None, req_id: str | None = None
+    ) -> dict:
         """
         Create a standard envelope message originating from this node.
         """
@@ -143,7 +139,13 @@ class Node:
             "data": data or {},
         }
 
-    def make_response(self, status: str, req_id: str | None = None, data: dict | None = None, error: str | None = None) -> dict:
+    def make_response(
+        self,
+        status: str,
+        req_id: str | None = None,
+        data: dict | None = None,
+        error: str | None = None,
+    ) -> dict:
         """
         Create a standard envelope response.
         """
@@ -155,8 +157,6 @@ class Node:
         if error is not None:
             resp["error"] = error
         return resp
-    
-    
 
     def get_replica_nodes(self) -> list[dict]:
         """
@@ -170,12 +170,14 @@ class Node:
         if self.successor["id"] == self.node_id:
             return []
 
-        resp = self.handle_message({
-        "type": "OVERLAY",
-        "req_id": "overlay_for_replicas",
-        "origin": {"ip": self.ip, "port": self.port},
-        "data": {"start_id": self.node_id, "acc": []},
-    })
+        resp = self.handle_message(
+            {
+                "type": "OVERLAY",
+                "req_id": "overlay_for_replicas",
+                "origin": {"ip": self.ip, "port": self.port},
+                "data": {"start_id": self.node_id, "acc": []},
+            }
+        )
         if resp.get("status") != "OK":
             return []
         ring = resp["data"]["ring"]
@@ -191,9 +193,11 @@ class Node:
         replicas = []
         for step in range(1, min(self.k, len(ring))):
             j = (idx + step) % len(ring)
-            replicas.append({"ip": ring[j]["ip"], "port": ring[j]["port"], "id": ring[j]["id"]})
+            replicas.append(
+                {"ip": ring[j]["ip"], "port": ring[j]["port"], "id": ring[j]["id"]}
+            )
         return replicas
-    
+
     # --- Core request handler ---
 
     def handle_message(self, message: dict) -> dict:
@@ -213,7 +217,9 @@ class Node:
 
         # Minimal validation
         if not msg_type:
-            return self.make_response("ERROR", req_id=req_id, error="Missing 'type' field")
+            return self.make_response(
+                "ERROR", req_id=req_id, error="Missing 'type' field"
+            )
 
         if msg_type == "PING":
             return self.make_response(
@@ -227,106 +233,137 @@ class Node:
                     "predecessor": self.predecessor,
                 },
             )
-            
+
         # --- Bulk insert (used for key transfers / future replication) ---
         if msg_type == "BULK_INSERT":
-           items = data.get("items", [])
-           # items: list of {"key_id": int, "key": str, "value": str}
-           for it in items:
-               self.storage.insert(it["key_id"], it["key"], it["value"])
-           return self.make_response("OK", req_id=req_id, data={"count": len(items)})
+            items = data.get("items", [])
+            # items: list of {"key_id": int, "key": str, "value": str}
+            for it in items:
+                self.storage.insert(it["key_id"], it["key"], it["value"])
+            return self.make_response("OK", req_id=req_id, data={"count": len(items)})
 
-       # --- Transfer keys to a new node after join ---
-       # New node asks its successor to send keys that now belong to new node.
+        # --- Transfer keys to a new node after join ---
+        # New node asks its successor to send keys that now belong to new node.
         if msg_type == "TRANSFER_KEYS":
-           new_node = data.get("new_node")
-           if not new_node:
-               return self.make_response("ERROR", req_id=req_id, error="Missing data.new_node")
+            new_node = data.get("new_node")
+            if not new_node:
+                return self.make_response(
+                    "ERROR", req_id=req_id, error="Missing data.new_node"
+                )
 
-           new_id = new_node["id"]
-           # Keys that should move to new node are those in (pred_of_new, new]
-           # From the successor's perspective, these are keys in (self.predecessor.id, new_id]
-           # because after join, successor.predecessor will be set to new, but timing can vary.
-           # We use current predecessor as the left bound.
-           left = self.predecessor["id"]
-           right = new_id
+            new_id = new_node["id"]
+            # Keys that should move to new node are those in (pred_of_new, new]
+            # From the successor's perspective, these are keys in (self.predecessor.id, new_id]
+            # because after join, successor.predecessor will be set to new, but timing can vary.
+            # We use current predecessor as the left bound.
+            left = self.predecessor["id"]
+            right = new_id
 
-           all_local = self.storage.get_all()
-           to_move = []
-           to_delete = []
+            all_local = self.storage.get_all()
+            to_move = []
+            to_delete = []
 
-           for key_id, rec in all_local.items():
-               if in_interval(int(key_id), left, right):
-                   to_move.append({"key_id": int(key_id), "key": rec["key"], "value": rec["value"]})
-                   to_delete.append(int(key_id))
+            for key_id, rec in all_local.items():
+                if in_interval(int(key_id), left, right):
+                    to_move.append(
+                        {
+                            "key_id": int(key_id),
+                            "key": rec["key"],
+                            "value": rec["value"],
+                        }
+                    )
+                    to_delete.append(int(key_id))
 
-           # Send to new node
-           if to_move:
-               send_request(
-                   new_node["ip"],
-                   new_node["port"],
-                   {
-                       "type": "BULK_INSERT",
-                       "req_id": req_id,
-                       "origin": {"ip": self.ip, "port": self.port},
-                       "data": {"items": to_move},
-                   },
-               )
-               # Remove moved keys locally
-               for kid in to_delete:
-                   self.storage.delete(kid)
+            # Send to new node
+            if to_move:
+                send_request(
+                    new_node["ip"],
+                    new_node["port"],
+                    {
+                        "type": "BULK_INSERT",
+                        "req_id": req_id,
+                        "origin": {"ip": self.ip, "port": self.port},
+                        "data": {"items": to_move},
+                    },
+                )
+                # Remove moved keys locally
+                for kid in to_delete:
+                    self.storage.delete(kid)
 
-            
+            return self.make_response("OK", req_id=req_id, data={"moved": len(to_move)})
 
-           return self.make_response("OK", req_id=req_id, data={"moved": len(to_move)})
-
-            
             # --- Basic ring queries ---
 
         if msg_type == "GET_PREDECESSOR":
-           return self.make_response("OK", req_id=req_id, data={"predecessor": self.predecessor})
+            return self.make_response(
+                "OK", req_id=req_id, data={"predecessor": self.predecessor}
+            )
 
         if msg_type == "GET_SUCCESSOR":
-           return self.make_response("OK", req_id=req_id, data={"successor": self.successor})
+            return self.make_response(
+                "OK", req_id=req_id, data={"successor": self.successor}
+            )
 
         if msg_type == "SET_PREDECESSOR":
-           node_info = data.get("node")
-           if not node_info:
-               return self.make_response("ERROR", req_id=req_id, error="Missing data.node")
-           self.set_predecessor(node_info)
-           return self.make_response("OK", req_id=req_id, data={"predecessor": self.predecessor})
+            node_info = data.get("node")
+            if not node_info:
+                return self.make_response(
+                    "ERROR", req_id=req_id, error="Missing data.node"
+                )
+            self.set_predecessor(node_info)
+            return self.make_response(
+                "OK", req_id=req_id, data={"predecessor": self.predecessor}
+            )
 
         if msg_type == "SET_SUCCESSOR":
-           node_info = data.get("node")
-           if not node_info:
-               return self.make_response("ERROR", req_id=req_id, error="Missing data.node")
-           self.set_successor(node_info)
-           return self.make_response("OK", req_id=req_id, data={"successor": self.successor})
+            node_info = data.get("node")
+            if not node_info:
+                return self.make_response(
+                    "ERROR", req_id=req_id, error="Missing data.node"
+                )
+            self.set_successor(node_info)
+            return self.make_response(
+                "OK", req_id=req_id, data={"successor": self.successor}
+            )
 
-       # --- FIND_SUCCESSOR (Chord routing without finger tables) ---
-       # Returns the successor of a target id.
+        # --- FIND_SUCCESSOR (Chord routing without finger tables) ---
+        # Returns the successor of a target id.
         if msg_type == "FIND_SUCCESSOR":
-           target_id = data.get("id")
-           if target_id is None:
-               return self.make_response("ERROR", req_id=req_id, error="Missing data.id")
+            target_id = data.get("id")
+            if target_id is None:
+                return self.make_response(
+                    "ERROR", req_id=req_id, error="Missing data.id"
+                )
 
-           # If only one node in ring
-           if self.successor["id"] == self.node_id and self.predecessor["id"] == self.node_id:
-               return self.make_response("OK", req_id=req_id, data={"successor": self.successor})
+            # If only one node in ring
+            if (
+                self.successor["id"] == self.node_id
+                and self.predecessor["id"] == self.node_id
+            ):
+                return self.make_response(
+                    "OK", req_id=req_id, data={"successor": self.successor}
+                )
 
-           # If target ∈ (self, successor] -> successor is answer
-           if in_interval(target_id, self.node_id, self.successor["id"]):
-               return self.make_response("OK", req_id=req_id, data={"successor": self.successor})
+            # If target ∈ (self, successor] -> successor is answer
+            if in_interval(target_id, self.node_id, self.successor["id"]):
+                return self.make_response(
+                    "OK", req_id=req_id, data={"successor": self.successor}
+                )
 
-           # Otherwise forward to successor
-           return self.forward_to_successor(message)
+            # Otherwise forward to successor
+            return self.forward_to_successor(message)
 
         if msg_type == "JOIN_REQUEST":
             new_node = data.get("new_node")
             if not new_node:
-                return self.make_response("ERROR", req_id=req_id, error="Missing data.new_node")
+                return self.make_response(
+                    "ERROR", req_id=req_id, error="Missing data.new_node"
+                )
 
-            alone = (self.successor["id"] == self.node_id and self.predecessor["id"] == self.node_id)
+            alone = (
+                self.successor["id"] == self.node_id
+                and self.predecessor["id"] == self.node_id
+            )
             if alone:
                 self.successor = new_node
                 self.predecessor = new_node
@@ -334,8 +371,16 @@ class Node:
                     "OK",
                     req_id=req_id,
                     data={
-                        "successor": {"ip": self.ip, "port": self.port, "id": self.node_id},
-                        "predecessor": {"ip": self.ip, "port": self.port, "id": self.node_id},
+                        "successor": {
+                            "ip": self.ip,
+                            "port": self.port,
+                            "id": self.node_id,
+                        },
+                        "predecessor": {
+                            "ip": self.ip,
+                            "port": self.port,
+                            "id": self.node_id,
+                        },
                         "mode": "two_node_bootstrap",
                     },
                 )
@@ -357,46 +402,112 @@ class Node:
                 req_id=req_id,
                 data={"successor": resp["data"]["successor"], "mode": "normal"},
             )
-                # --- INSERT ---
+        # --- INSERT ---
         if msg_type == "INSERT":
-           key = data.get("key")
-           value = data.get("value")
-           if key is None or value is None:
-               return self.make_response("ERROR", req_id=req_id, error="Missing key or value")
+            key = data.get("key")
+            value = data.get("value")
 
-           key_id = sha1_int(key)
+            if key is None or value is None:
+                return self.make_response(
+                    "ERROR", req_id=req_id, error="Missing key or value"
+                )
 
-           # If I am responsible -> store locally as PRIMARY then replicate
-           if self.is_responsible(key_id):
-               self.storage.insert_primary(key_id, key, value)
+            key_id = sha1_int(key)
 
-               # replicate full current value (mirror primary state)
-               current = self.storage.query(key_id)
-               replicas = self.get_replica_nodes()
-               primary_info = {"ip": self.ip, "port": self.port, "id": self.node_id}
+            # Linear mode: ensure request reaches PRIMARY first
+            if self.consistency == "linear" and not self.is_responsible(key_id):
+                return self.forward_to_successor(message)
 
-               for r in replicas:
-                   send_request(r["ip"], r["port"], {
-                       "type": "REPLICA_PUT",
-                       "req_id": req_id,
-                       "origin": {"ip": self.ip, "port": self.port},
-                       "data": {
-                           "key_id": key_id,
-                           "key": key,
-                           "value": current["value"],
-                           "primary": primary_info
-                       }
-                   })
+            # If I am responsible (PRIMARY)
+            if self.is_responsible(key_id):
 
-               return self.make_response("OK", req_id=req_id, data={"stored_at": self.port, "replicas": len(replicas)})
+                # ================= LINEAR MODE =================
+                if self.consistency == "linear":
 
-           # Otherwise forward
-           return self.forward_to_successor(message)
+                    replicas = self.get_replica_nodes()
+                    chain = [
+                        {"ip": self.ip, "port": self.port, "id": self.node_id}
+                    ] + replicas
 
-        
+                    # Apply once at head
+                    self.storage.insert_primary(key_id, key, value)
+
+                    record = self.storage.query(key_id)
+                    if record is None:
+                        return self.make_response(
+                            "ERROR",
+                            req_id=req_id,
+                            error="Failed to store key",
+                        )
+
+                    # No replicas (k = 1)
+                    if len(chain) == 1:
+                        return self.make_response(
+                            "OK",
+                            req_id=req_id,
+                            data={"stored_at": self.port, "mode": "linear_chain"},
+                        )
+
+                    # Send to first replica in chain
+                    return send_request(
+                        chain[1]["ip"],
+                        chain[1]["port"],
+                        {
+                            "type": "CHAIN_PUT",
+                            "req_id": req_id,
+                            "origin": message.get("origin"),
+                            "data": {
+                                "key_id": key_id,
+                                "key": key,
+                                "value": record["value"],
+                                "chain": chain,
+                                "index": 1,
+                            },
+                        },
+                    )
+
+                # ================= EVENTUAL MODE =================
+                self.storage.insert_primary(key_id, key, value)
+                record = self.storage.query(key_id)
+                if record is None:
+                    return self.make_response(
+                        "ERROR",
+                        req_id=req_id,
+                        error="Failed to store key",
+                    )
+                replicas = self.get_replica_nodes()
+                primary_info = {"ip": self.ip, "port": self.port, "id": self.node_id}
+
+                for r in replicas:
+                    send_request(
+                        r["ip"],
+                        r["port"],
+                        {
+                            "type": "REPLICA_PUT",
+                            "req_id": req_id,
+                            "origin": {"ip": self.ip, "port": self.port},
+                            "data": {
+                                "key_id": key_id,
+                                "key": key,
+                                "value": record["value"],
+                                "primary": primary_info,
+                            },
+                        },
+                    )
+
+                return self.make_response(
+                    "OK",
+                    req_id=req_id,
+                    data={"stored_at": self.port, "replicas": len(replicas)},
+                )
+
+            # Otherwise forward (eventual fallback)
+            return self.forward_to_successor(message)
+
         # --- QUERY ---
         if msg_type == "QUERY":
             key = data.get("key")
+
             if key is None:
                 return self.make_response("ERROR", req_id=req_id, error="Missing key")
 
@@ -411,69 +522,136 @@ class Node:
                         "origin": {"ip": self.ip, "port": self.port},
                         "data": {
                             "start_id": self.node_id,
-                            "acc": {
-                                f"{self.ip}:{self.port}": self.storage.get_all()
-                            }
-                        }
-                    }
+                            "acc": {f"{self.ip}:{self.port}": self.storage.get_all()},
+                        },
+                    },
                 )
 
-            # --- Single key query ---
-
+            # -------- Single key --------
             key_id = sha1_int(key)
 
-            # 1️⃣ If I already have it locally (PRIMARY or REPLICA)
+            # Linear: ensure request reaches PRIMARY first
+            if self.consistency == "linear" and not self.is_responsible(key_id):
+                return self.forward_to_successor(message)
+
+            # ================= LINEAR MODE =================
+            if self.consistency == "linear" and self.is_responsible(key_id):
+
+                replicas = self.get_replica_nodes()
+                chain = [
+                    {"ip": self.ip, "port": self.port, "id": self.node_id}
+                ] + replicas
+
+                tail = chain[-1]
+
+                # If I am tail (k = 1 or single-node case)
+                if tail["id"] == self.node_id:
+                    local = self.storage.query(key_id)
+                    return self.make_response(
+                        "OK",
+                        req_id=req_id,
+                        data={"result": local, "served_by": self.port},
+                    )
+
+                # Ask tail directly
+                return send_request(
+                    tail["ip"],
+                    tail["port"],
+                    {
+                        "type": "CHAIN_GET",
+                        "req_id": req_id,
+                        "origin": message.get("origin"),
+                        "data": {"key_id": key_id},
+                    },
+                )
+
+            # ================= EVENTUAL MODE =================
             local = self.storage.query(key_id)
+
             if local is not None:
                 return self.make_response(
                     "OK",
                     req_id=req_id,
-                    data={
-                        "result": local,
-                        "served_by": self.port
-                    }
+                    data={"result": local, "served_by": self.port},
                 )
 
-            # 2️⃣ If I am responsible but key not found
             if self.is_responsible(key_id):
                 return self.make_response(
                     "OK",
                     req_id=req_id,
-                    data={
-                        "result": None,
-                        "served_by": self.port
-                    }
+                    data={"result": None, "served_by": self.port},
                 )
 
-            # 3️⃣ Otherwise forward
             return self.forward_to_successor(message)
-        
-                # --- DELETE ---
+
+        # --- DELETE ---
         if msg_type == "DELETE":
-           key = data.get("key")
-           if key is None:
-               return self.make_response("ERROR", req_id=req_id, error="Missing key")
+            key = data.get("key")
+            if key is None:
+                return self.make_response("ERROR", req_id=req_id, error="Missing key")
 
-           key_id = sha1_int(key)
+            key_id = sha1_int(key)
 
-           if self.is_responsible(key_id):
-               self.storage.delete(key_id)
+            # Linear mode: ensure request reaches PRIMARY first
+            if self.consistency == "linear" and not self.is_responsible(key_id):
+                return self.forward_to_successor(message)
 
-               replicas = self.get_replica_nodes()
-               for r in replicas:
-                   send_request(r["ip"], r["port"], {
-                       "type": "REPLICA_DELETE",
-                       "req_id": req_id,
-                       "origin": {"ip": self.ip, "port": self.port},
-                       "data": {"key_id": key_id}
-                   })
+            if self.is_responsible(key_id):
 
-               return self.make_response("OK", req_id=req_id, data={"deleted_from": self.port, "replicas": len(replicas)})
+                # ================= LINEAR MODE =================
+                if self.consistency == "linear":
 
-           return self.forward_to_successor(message)
+                    replicas = self.get_replica_nodes()
+                    chain = [
+                        {"ip": self.ip, "port": self.port, "id": self.node_id}
+                    ] + replicas
 
-        
-                # --- QUERY ALL ("*") ---
+                    # delete at head
+                    self.storage.delete(key_id)
+
+                    # no replicas (k = 1)
+                    if len(chain) == 1:
+                        return self.make_response(
+                            "OK", req_id=req_id, data={"deleted_from": self.port}
+                        )
+
+                    # send to first replica in chain
+                    return send_request(
+                        chain[1]["ip"],
+                        chain[1]["port"],
+                        {
+                            "type": "CHAIN_DELETE",
+                            "req_id": req_id,
+                            "origin": message.get("origin"),
+                            "data": {"key_id": key_id, "chain": chain, "index": 1},
+                        },
+                    )
+
+                # ================= EVENTUAL MODE =================
+                self.storage.delete(key_id)
+
+                replicas = self.get_replica_nodes()
+                for r in replicas:
+                    send_request(
+                        r["ip"],
+                        r["port"],
+                        {
+                            "type": "REPLICA_DELETE",
+                            "req_id": req_id,
+                            "origin": {"ip": self.ip, "port": self.port},
+                            "data": {"key_id": key_id},
+                        },
+                    )
+
+                return self.make_response(
+                    "OK",
+                    req_id=req_id,
+                    data={"deleted_from": self.port, "replicas": len(replicas)},
+                )
+
+            return self.forward_to_successor(message)
+
+            # --- QUERY ALL ("*") ---
         if msg_type == "QUERY_ALL":
             start_id = data.get("start_id")
             acc = data.get("acc", {})
@@ -493,19 +671,17 @@ class Node:
                     "type": "QUERY_ALL",
                     "req_id": req_id,
                     "origin": message.get("origin"),
-                    "data": {
-                        "start_id": start_id,
-                        "acc": acc
-                    }
-                }
+                    "data": {"start_id": start_id, "acc": acc},
+                },
             )
-        
-          # --- DEPART (graceful) ---
-        if msg_type == "DEPART":
-           self._do_depart()
-           return self.make_response("OK", req_id=req_id, data={"msg": "Depart completed"})
 
-                # --- OVERLAY ---
+        # --- DEPART (graceful) ---
+        if msg_type == "DEPART":
+            self._do_depart()
+            return self.make_response(
+                "OK", req_id=req_id, data={"msg": "Depart completed"}
+            )
+
         # --- OVERLAY ---
         if msg_type == "OVERLAY":
             start_id = data.get("start_id")
@@ -517,19 +693,11 @@ class Node:
                 acc = []
 
             # add myself
-            acc.append({
-                "id": self.node_id,
-                "ip": self.ip,
-                "port": self.port
-            })
+            acc.append({"id": self.node_id, "ip": self.ip, "port": self.port})
 
             # stop condition
             if self.successor["id"] == start_id:
-                return self.make_response(
-                    "OK",
-                    req_id=req_id,
-                    data={"ring": acc}
-                )
+                return self.make_response("OK", req_id=req_id, data={"ring": acc})
 
             # forward
             return send_request(
@@ -539,13 +707,102 @@ class Node:
                     "type": "OVERLAY",
                     "req_id": req_id,
                     "origin": message.get("origin"),
+                    "data": {"start_id": start_id, "acc": acc},
+                },
+            )
+
+        if msg_type == "CHAIN_PUT":
+
+            kid = data.get("key_id")
+            key = data.get("key")
+            value = data.get("value")
+            chain = data.get("chain")
+            idx = data.get("index")
+
+            if (
+                kid is None
+                or key is None
+                or value is None
+                or chain is None
+                or idx is None
+            ):
+                return self.make_response(
+                    "ERROR", req_id=req_id, error="Missing fields in CHAIN_PUT"
+                )
+
+            key_id = int(kid)
+            index = int(idx)
+
+            primary_info = chain[0]
+            self.storage.put_replica(key_id, key, value, primary_info)
+
+            if index == len(chain) - 1:
+                return self.make_response(
+                    "OK", req_id=req_id, data={"committed_at": self.port}
+                )
+
+            next_node = chain[index + 1]
+
+            return send_request(
+                next_node["ip"],
+                next_node["port"],
+                {
+                    "type": "CHAIN_PUT",
+                    "req_id": req_id,
+                    "origin": message.get("origin"),
                     "data": {
-                        "start_id": start_id,
-                        "acc": acc
+                        "key_id": key_id,
+                        "key": key,
+                        "value": value,
+                        "chain": chain,
+                        "index": index + 1,
                     },
                 },
             )
-        
+
+        if msg_type == "CHAIN_GET":
+
+            kid = data.get("key_id")
+            if kid is None:
+                return ERROR
+
+            key_id = int(kid)
+            local = self.storage.query(key_id)
+
+            return self.make_response("OK", req_id=req_id, data={"result": local})
+
+        if msg_type == "CHAIN_DELETE":
+
+            kid = data.get("key_id")
+            chain = data.get("chain")
+            idx = data.get("index")
+
+            if kid is None or chain is None or idx is None:
+                return ERROR
+
+            key_id = int(kid)
+            index = int(idx)
+
+            self.storage.delete(key_id)
+
+            if index == len(chain) - 1:
+                return self.make_response(
+                    "OK", req_id=req_id, data={"deleted_at": self.port}
+                )
+
+            next_node = chain[index + 1]
+
+            return send_request(
+                next_node["ip"],
+                next_node["port"],
+                {
+                    "type": "CHAIN_DELETE",
+                    "req_id": req_id,
+                    "origin": message.get("origin"),
+                    "data": {"key_id": key_id, "chain": chain, "index": index + 1},
+                },
+            )
+
         # --- REPLICA_PUT (store replica copy) ---
         if msg_type == "REPLICA_PUT":
             key_id = data.get("key_id")
@@ -553,21 +810,28 @@ class Node:
             value = data.get("value")
             primary = data.get("primary")
             if key_id is None or key is None or value is None or primary is None:
-                return self.make_response("ERROR", req_id=req_id, error="Missing replica fields")
+                return self.make_response(
+                    "ERROR", req_id=req_id, error="Missing replica fields"
+                )
 
             self.storage.put_replica(int(key_id), key, value, primary)
-            return self.make_response("OK", req_id=req_id, data={"replica_at": self.port})
+            return self.make_response(
+                "OK", req_id=req_id, data={"replica_at": self.port}
+            )
 
         # --- REPLICA_DELETE (delete replica copy) ---
         if msg_type == "REPLICA_DELETE":
             key_id = data.get("key_id")
             if key_id is None:
-                return self.make_response("ERROR", req_id=req_id, error="Missing key_id")
+                return self.make_response(
+                    "ERROR", req_id=req_id, error="Missing key_id"
+                )
 
             self.storage.delete(int(key_id))
-            return self.make_response("OK", req_id=req_id, data={"replica_deleted_at": self.port})
-      
-        
+            return self.make_response(
+                "OK", req_id=req_id, data={"replica_deleted_at": self.port}
+            )
+
         # --- REPAIR_REPLICAS: re-push replicas for all PRIMARY keys ---
         if msg_type == "REPAIR_REPLICAS":
             primary_items = self.storage.get_primary_only()
@@ -577,17 +841,21 @@ class Node:
             pushed = 0
             for key_id, rec in primary_items.items():
                 for r in replicas:
-                    send_request(r["ip"], r["port"], {
-                        "type": "REPLICA_PUT",
-                        "req_id": req_id,
-                        "origin": {"ip": self.ip, "port": self.port},
-                        "data": {
-                            "key_id": int(key_id),
-                            "key": rec["key"],
-                            "value": rec["value"],
-                            "primary": primary_info
-                        }
-                    })
+                    send_request(
+                        r["ip"],
+                        r["port"],
+                        {
+                            "type": "REPLICA_PUT",
+                            "req_id": req_id,
+                            "origin": {"ip": self.ip, "port": self.port},
+                            "data": {
+                                "key_id": int(key_id),
+                                "key": rec["key"],
+                                "value": rec["value"],
+                                "primary": primary_info,
+                            },
+                        },
+                    )
                     pushed += 1
 
             return self.make_response("OK", req_id=req_id, data={"pushed": pushed})
@@ -596,24 +864,30 @@ class Node:
         if msg_type == "REPAIR_RING":
             start_id = data.get("start_id")
             if start_id is None:
-                return self.make_response("ERROR", req_id=req_id, error="Missing start_id")
+                return self.make_response(
+                    "ERROR", req_id=req_id, error="Missing start_id"
+                )
 
             # repair myself
-            self.handle_message({
-                "type": "REPAIR_REPLICAS",
-                "req_id": req_id,
-                "origin": message.get("origin"),
-                "data": {}
-            })
+            self.handle_message(
+                {
+                    "type": "REPAIR_REPLICAS",
+                    "req_id": req_id,
+                    "origin": message.get("origin"),
+                    "data": {},
+                }
+            )
 
             # stop condition
             if self.successor["id"] == start_id:
-                return self.make_response("OK", req_id=req_id, data={"msg": "Repair completed"})
+                return self.make_response(
+                    "OK", req_id=req_id, data={"msg": "Repair completed"}
+                )
 
             return send_request(
                 self.successor["ip"],
                 self.successor["port"],
-                { 
+                {
                     "type": "REPAIR_RING",
                     "req_id": req_id,
                     "origin": message.get("origin"),
@@ -621,8 +895,9 @@ class Node:
                 },
             )
 
-
-        return self.make_response("UNKNOWN", req_id=req_id, data={"received_type": msg_type})
+        return self.make_response(
+            "UNKNOWN", req_id=req_id, data={"received_type": msg_type}
+        )
 
 
 if __name__ == "__main__":
@@ -630,17 +905,25 @@ if __name__ == "__main__":
     parser.add_argument("--ip", default="127.0.0.1")
     parser.add_argument("--port", type=int, required=True)
 
-    parser.add_argument("--bootstrap", action="store_true",
-                        help="Run as bootstrap node")
+    parser.add_argument(
+        "--bootstrap", action="store_true", help="Run as bootstrap node"
+    )
     parser.add_argument("--bootstrap-ip", default="127.0.0.1")
     parser.add_argument("--bootstrap-port", type=int, default=None)
     parser.add_argument("--overlay", action="store_true", help="Print ring topology")
-    parser.add_argument("--depart", action="store_true", help="Gracefully leave the ring")
-    parser.add_argument("--k", type=int, default=1, help="Replication factor (primary + k-1 successors)")
+    parser.add_argument(
+        "--depart", action="store_true", help="Gracefully leave the ring"
+    )
+    parser.add_argument(
+        "--k", type=int, default=1, help="Replication factor (primary + k-1 successors)"
+    )
+    parser.add_argument(
+        "--consistency", choices=["eventual", "linear"], default="eventual"
+    )
 
     args = parser.parse_args()
 
-    node = Node(args.ip, args.port, k=args.k)
+    node = Node(args.ip, args.port, k=args.k, consistency=args.consistency)
     if args.overlay:
         result = send_request(
             args.ip,
@@ -649,11 +932,8 @@ if __name__ == "__main__":
                 "type": "OVERLAY",
                 "req_id": "overlay_cli",
                 "origin": {"ip": args.ip, "port": args.port},
-                "data": {
-                    "start_id": node.node_id,
-                "acc": []
-                }
-            }
+                "data": {"start_id": node.node_id, "acc": []},
+            },
         )
         print(result)
         raise SystemExit(0)
@@ -666,8 +946,8 @@ if __name__ == "__main__":
                 "type": "DEPART",
                 "req_id": "depart_cli",
                 "origin": {"ip": args.ip, "port": args.port},
-                "data": {}
-            }
+                "data": {},
+            },
         )
         print(result)
         raise SystemExit(0)
@@ -688,11 +968,7 @@ if __name__ == "__main__":
                 "req_id": "join_" + str(args.port),
                 "origin": {"ip": args.ip, "port": args.port},
                 "data": {
-                    "new_node": {
-                        "ip": node.ip,
-                        "port": node.port,
-                        "id": node.node_id
-                    }
+                    "new_node": {"ip": node.ip, "port": node.port, "id": node.node_id}
                 },
             },
         )
@@ -711,49 +987,54 @@ if __name__ == "__main__":
             node.predecessor = join_resp["data"]["predecessor"]
 
             # Tell bootstrap to update pointers to me
-            send_request(args.bootstrap_ip, args.bootstrap_port, {
-                "type": "SET_SUCCESSOR",
-                "req_id": "set_succ_" + str(args.port),
-                "origin": {"ip": args.ip, "port": args.port},
-                "data": {
-                    "node": {
-                        "ip": node.ip,
-                        "port": node.port,
-                        "id": node.node_id
-                    }
+            send_request(
+                args.bootstrap_ip,
+                args.bootstrap_port,
+                {
+                    "type": "SET_SUCCESSOR",
+                    "req_id": "set_succ_" + str(args.port),
+                    "origin": {"ip": args.ip, "port": args.port},
+                    "data": {
+                        "node": {"ip": node.ip, "port": node.port, "id": node.node_id}
+                    },
                 },
-            })
+            )
 
-            send_request(args.bootstrap_ip, args.bootstrap_port, {
-                "type": "SET_PREDECESSOR",
-                "req_id": "set_pred_" + str(args.port),
-                "origin": {"ip": args.ip, "port": args.port},
-                "data": {
-                    "node": {
-                        "ip": node.ip,
-                        "port": node.port,
-                        "id": node.node_id
-                    }
+            send_request(
+                args.bootstrap_ip,
+                args.bootstrap_port,
+                {
+                    "type": "SET_PREDECESSOR",
+                    "req_id": "set_pred_" + str(args.port),
+                    "origin": {"ip": args.ip, "port": args.port},
+                    "data": {
+                        "node": {"ip": node.ip, "port": node.port, "id": node.node_id}
+                    },
                 },
-            })
+            )
 
             # Ask successor (bootstrap) to transfer keys
-            send_request(node.successor["ip"], node.successor["port"], {
-                "type": "TRANSFER_KEYS",
-                "req_id": "xfer_" + str(args.port),
-                "origin": {"ip": args.ip, "port": args.port},
-                "data": {
-                    "new_node": {
-                        "ip": node.ip,
-                        "port": node.port,
-                        "id": node.node_id
-                    }
+            send_request(
+                node.successor["ip"],
+                node.successor["port"],
+                {
+                    "type": "TRANSFER_KEYS",
+                    "req_id": "xfer_" + str(args.port),
+                    "origin": {"ip": args.ip, "port": args.port},
+                    "data": {
+                        "new_node": {
+                            "ip": node.ip,
+                            "port": node.port,
+                            "id": node.node_id,
+                        }
+                    },
                 },
-            })
+            )
 
-            print(f"Joined ring (2-node). My pred={node.predecessor} "
-                  f"succ={node.successor}")
-            
+            print(
+                f"Joined ring (2-node). My pred={node.predecessor} "
+                f"succ={node.successor}"
+            )
 
         # -------------------------
         # NORMAL JOIN CASE
@@ -763,12 +1044,16 @@ if __name__ == "__main__":
             node.successor = succ
 
             # 2) Ask successor for its predecessor
-            pred_resp = send_request(succ["ip"], succ["port"], {
-                "type": "GET_PREDECESSOR",
-                "req_id": "get_pred_" + str(args.port),
-                "origin": {"ip": args.ip, "port": args.port},
-                "data": {},
-            })
+            pred_resp = send_request(
+                succ["ip"],
+                succ["port"],
+                {
+                    "type": "GET_PREDECESSOR",
+                    "req_id": "get_pred_" + str(args.port),
+                    "origin": {"ip": args.ip, "port": args.port},
+                    "data": {},
+                },
+            )
 
             if pred_resp.get("status") != "OK":
                 print("GET_PREDECESSOR failed:", pred_resp)
@@ -778,49 +1063,52 @@ if __name__ == "__main__":
             node.predecessor = pred
 
             # 3) Tell successor to set predecessor = me
-            send_request(succ["ip"], succ["port"], {
-                "type": "SET_PREDECESSOR",
-                "req_id": "set_pred_succ_" + str(args.port),
-                "origin": {"ip": args.ip, "port": args.port},
-                "data": {
-                    "node": {
-                        "ip": node.ip,
-                        "port": node.port,
-                        "id": node.node_id
-                    }
+            send_request(
+                succ["ip"],
+                succ["port"],
+                {
+                    "type": "SET_PREDECESSOR",
+                    "req_id": "set_pred_succ_" + str(args.port),
+                    "origin": {"ip": args.ip, "port": args.port},
+                    "data": {
+                        "node": {"ip": node.ip, "port": node.port, "id": node.node_id}
+                    },
                 },
-            })
+            )
 
             # 4) Tell predecessor to set successor = me
-            send_request(pred["ip"], pred["port"], {
-                "type": "SET_SUCCESSOR",
-                "req_id": "set_succ_pred_" + str(args.port),
-                "origin": {"ip": args.ip, "port": args.port},
-                "data": {
-                    "node": {
-                        "ip": node.ip,
-                        "port": node.port,
-                        "id": node.node_id
-                    }
+            send_request(
+                pred["ip"],
+                pred["port"],
+                {
+                    "type": "SET_SUCCESSOR",
+                    "req_id": "set_succ_pred_" + str(args.port),
+                    "origin": {"ip": args.ip, "port": args.port},
+                    "data": {
+                        "node": {"ip": node.ip, "port": node.port, "id": node.node_id}
+                    },
                 },
-            })
+            )
 
             # 5) Ask successor to transfer keys that now belong to me
-            send_request(succ["ip"], succ["port"], {
-                "type": "TRANSFER_KEYS",
-                "req_id": "xfer_" + str(args.port),
-                "origin": {"ip": args.ip, "port": args.port},
-                "data": {
-                    "new_node": {
-                        "ip": node.ip,
-                        "port": node.port,
-                        "id": node.node_id
-                    }
+            send_request(
+                succ["ip"],
+                succ["port"],
+                {
+                    "type": "TRANSFER_KEYS",
+                    "req_id": "xfer_" + str(args.port),
+                    "origin": {"ip": args.ip, "port": args.port},
+                    "data": {
+                        "new_node": {
+                            "ip": node.ip,
+                            "port": node.port,
+                            "id": node.node_id,
+                        }
+                    },
                 },
-            })
+            )
 
-            print(f"Joined ring. My pred={node.predecessor} "
-                  f"succ={node.successor}")
+            print(f"Joined ring. My pred={node.predecessor} " f"succ={node.successor}")
     # -------------------------
     # Always start server
     # -------------------------

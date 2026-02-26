@@ -57,17 +57,6 @@ def start_server(node, ip: str, port: int):
 
     print(f"Listening on {ip}:{port}")
 
-    # --- REPAIR AFTER START (only if replication enabled) ---
-    if getattr(node, "k", 1) > 1:
-        try:
-            node.handle_message({
-                "type": "REPAIR_RING",
-                "req_id": "repair_after_start",
-                "origin": {"ip": node.ip, "port": node.port},
-                "data": {"start_id": node.node_id},
-            })
-        except Exception as e:
-            print("Repair failed at startup:", e)
 
     while True:
         conn, addr = server.accept()
