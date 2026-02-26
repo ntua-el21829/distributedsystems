@@ -239,7 +239,7 @@ class Node:
             items = data.get("items", [])
             # items: list of {"key_id": int, "key": str, "value": str}
             for it in items:
-                self.storage.insert(it["key_id"], it["key"], it["value"])
+                self.storage.insert_primary(it["key_id"], it["key"], it["value"])
             return self.make_response("OK", req_id=req_id, data={"count": len(items)})
 
         # --- Transfer keys to a new node after join ---
@@ -764,12 +764,16 @@ class Node:
 
             kid = data.get("key_id")
             if kid is None:
-                return ERROR
+                return self.make_response(
+                    "ERROR", req_id=req_id, error="Missing key_id"
+                )
 
             key_id = int(kid)
             local = self.storage.query(key_id)
 
-            return self.make_response("OK", req_id=req_id, data={"result": local})
+            return self.make_response(
+                "OK", req_id=req_id, data={"result": local, "served_by": self.port}
+            )
 
         if msg_type == "CHAIN_DELETE":
 
@@ -778,7 +782,9 @@ class Node:
             idx = data.get("index")
 
             if kid is None or chain is None or idx is None:
-                return ERROR
+                return self.make_response(
+                    "ERROR", req_id=req_id, error="Missing key_id"
+                )
 
             key_id = int(kid)
             index = int(idx)
