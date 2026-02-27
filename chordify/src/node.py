@@ -238,13 +238,13 @@ class Node:
         if next_node["id"] == self.node_id:
             next_node = self.successor
 
+        print("FINGER FORWARD from", self.port, "to", next_node["port"], "ttl", ttl)
+
         return send_request(
             next_node["ip"],
             next_node["port"],
             new_msg,
         )
-
-        print("FINGER FORWARD from", self.port, "to", next_node["port"])
 
     def closest_preceding_node(self, target_id: int) -> dict:
 
