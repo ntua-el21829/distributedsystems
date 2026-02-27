@@ -1370,16 +1370,13 @@ if __name__ == "__main__":
             maybe_repair_ring("after_join")
 
         if args.use_fingers:
-            # rebuild fingers in whole ring
-            send_request(
-                node.ip,
-                node.port,
+            node.handle_message(
                 {
                     "type": "REBUILD_FINGERS_RING",
                     "req_id": f"rebuild_fingers_{args.port}",
                     "origin": {"ip": node.ip, "port": node.port},
                     "data": {"start_id": node.node_id},
-                },
+                }
             )
 
     # -------------------------
