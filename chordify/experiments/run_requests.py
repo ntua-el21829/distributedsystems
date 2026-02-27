@@ -30,7 +30,7 @@ def main():
     with open(output_file, "w", encoding="utf-8") as out:
 
         for i, line in enumerate(lines):
-            parts = line.strip().split()
+            parts = [p.strip() for p in line.strip().replace(",", " ").split()]
 
             if not parts:
                 continue
