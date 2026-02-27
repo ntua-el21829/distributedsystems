@@ -2,6 +2,7 @@ import argparse
 from email.mime import message
 from itertools import chain
 import uuid
+import threading
 
 from hashing import sha1_int, in_interval, in_open_interval, MAX_ID
 from storage import Storage
@@ -1203,6 +1204,7 @@ if __name__ == "__main__":
 
         # After a topology change, rebuild replicas if possible
         maybe_repair_ring("after_depart")
+
         if args.use_fingers and args.bootstrap_port is not None:
             bs_id = get_node_id(args.bootstrap_ip, args.bootstrap_port)
 
@@ -1218,6 +1220,12 @@ if __name__ == "__main__":
             )
 
         raise SystemExit(0)
+
+    # Start server in background
+    server_thread = threading.Thread(
+        target=start_server, args=(node, args.ip, args.port), daemon=True
+    )
+    server_thread.start()
 
     # -------------------------
     # JOIN LOGIC (non-bootstrap)
@@ -1370,16 +1378,17 @@ if __name__ == "__main__":
             maybe_repair_ring("after_join")
 
         if args.use_fingers:
-            node.handle_message(
+            bs_id = get_node_id(args.bootstrap_ip, args.bootstrap_port)
+            send_request(
+                args.bootstrap_ip,
+                args.bootstrap_port,
                 {
                     "type": "REBUILD_FINGERS_RING",
-                    "req_id": f"rebuild_fingers_{args.port}",
-                    "origin": {"ip": node.ip, "port": node.port},
-                    "data": {"start_id": node.node_id},
-                }
+                    "req_id": f"rebuild_fingers_after_join_{args.port}",
+                    "origin": {"ip": args.ip, "port": args.port},
+                    "data": {"start_id": bs_id},
+                },
             )
 
-    # -------------------------
-    # Always start server
-    # -------------------------
-    start_server(node, args.ip, args.port)
+    # Keep process alive (server thread runs forever)
+    threading.Event().wait()
