@@ -10,7 +10,7 @@ from net import send_request
 lock = threading.Lock()
 
 
-def worker(file_path, port, value, results, index, start_barrier):
+def worker(file_path, port, results, index, start_barrier):
     success_count = 0
     failure_count = 0
 
@@ -20,15 +20,15 @@ def worker(file_path, port, value, results, index, start_barrier):
 
     with open(file_path, "r", encoding="utf-8") as f:
         for line in f:
-            song = line.strip()
-            if not song:
+            key = line.strip()
+            if not key:
                 continue
 
             msg = {
-                "type": "INSERT",
-                "req_id": f"exp_{index}_{success_count}",
+                "type": "QUERY",
+                "req_id": f"read_{index}_{success_count}",
                 "origin": {"ip": "127.0.0.1", "port": 9999},
-                "data": {"key": song, "value": str(value)},
+                "data": {"key": key},
             }
 
             response = send_request("127.0.0.1", port, msg)
@@ -48,36 +48,6 @@ def worker(file_path, port, value, results, index, start_barrier):
         }
 
 
-def verify_total_keys(base_port):
-    """
-    Κάνει QUERY "*" και μετρά μόνο primary keys
-    """
-    msg = {
-        "type": "QUERY",
-        "req_id": "verify_all",
-        "origin": {"ip": "127.0.0.1", "port": 9999},
-        "data": {"key": "*"},
-    }
-
-    response = send_request("127.0.0.1", base_port, msg)
-
-    if not response or response.get("status") != "OK":
-        print("Verification failed.")
-        return None
-
-    data = response["data"]["result"]
-
-    primary_count = 0
-
-    for node in data:
-        for key_hash in data[node]:
-            entry = data[node][key_hash]
-            if not entry.get("is_replica", False):
-                primary_count += 1
-
-    return primary_count
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-port", type=int, default=5000)
@@ -90,45 +60,33 @@ def main():
 
     for n in range(args.nodes):
         file_path = os.path.join(
-            os.path.dirname(__file__), "inserts", f"insert_{n:02d}_part.txt"
+            os.path.dirname(__file__), "queries", f"query_{n:02d}.txt"
         )
 
         port = args.base_port + n
-        value = n
 
         t = threading.Thread(
-            target=worker, args=(file_path, port, value, results, n, start_barrier)
+            target=worker, args=(file_path, port, results, n, start_barrier)
         )
+
         threads.append(t)
         t.start()
 
     for t in threads:
         t.join()
 
-    # Υπολογισμοί
     total_success = sum(results[i]["success"] for i in results)
     total_fail = sum(results[i]["fail"] for i in results)
     max_time = max(results[i]["time"] for i in results)
 
     throughput = total_success / max_time if max_time > 0 else 0
 
-    print("\n===== WRITE EXPERIMENT RESULTS =====")
-    print(f"Successful inserts: {total_success}")
-    print(f"Failed inserts: {total_fail}")
+    print("\n===== READ EXPERIMENT RESULTS =====")
+    print(f"Successful queries: {total_success}")
+    print(f"Failed queries: {total_fail}")
     print(f"Max completion time: {max_time:.4f} sec")
-    print(f"System throughput: {throughput:.4f} inserts/sec")
-
-    # Verification
-    verified_keys = verify_total_keys(args.base_port)
-
-    if verified_keys is not None:
-        print(f"Verified primary keys in DHT: {verified_keys}")
-        if verified_keys == total_success:
-            print("Verification: PASSED")
-        else:
-            print("Verification: MISMATCH")
-
-    print("====================================\n")
+    print(f"System read throughput: {throughput:.4f} queries/sec")
+    print("===================================\n")
 
 
 if __name__ == "__main__":
