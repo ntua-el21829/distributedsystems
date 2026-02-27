@@ -1203,7 +1203,9 @@ if __name__ == "__main__":
         print(result)
 
         # After a topology change, rebuild replicas if possible
-        maybe_repair_ring("after_depart")
+        if args.k > 1:
+            maybe_repair_ring("after_depart")
+
 
         if args.use_fingers and args.bootstrap_port is not None:
             bs_id = get_node_id(args.bootstrap_ip, args.bootstrap_port)
@@ -1213,7 +1215,7 @@ if __name__ == "__main__":
                 args.bootstrap_port,
                 {
                     "type": "REBUILD_FINGERS_RING",
-                    "req_id": f"rebuild_fingers_{args.port}",
+                    "req_id": f"rebuild_fingers_after_depart_{args.port}",
                     "origin": {"ip": args.ip, "port": args.port},
                     "data": {"start_id": bs_id},
                 },
@@ -1374,7 +1376,7 @@ if __name__ == "__main__":
             print(f"Joined ring. My pred={node.predecessor} succ={node.successor}")
 
         # After join, rebuild replicas if requested
-        if args.repair_after_join:
+        if args.k > 1:
             maybe_repair_ring("after_join")
 
         if args.use_fingers:
