@@ -384,6 +384,8 @@ class Node:
                     "port": self.port,
                     "successor": self.successor,
                     "predecessor": self.predecessor,
+                    "consistency": self.consistency,
+                    "replication_factor": self.k,
                 },
             )
 
@@ -668,6 +670,7 @@ class Node:
         # --- QUERY ---
         if msg_type == "QUERY":
             key = data.get("key")
+            data.setdefault("path", [])
 
             if key is None:
                 return self.make_response("ERROR", req_id=req_id, error="Missing key")
@@ -693,6 +696,7 @@ class Node:
 
             # Linear: ensure request reaches PRIMARY first
             if self.consistency == "linear" and not self.is_responsible(key_id):
+                data.setdefault("path", []).append(self.port)
                 if self.use_fingers:
                     return self.forward_with_ttl(message, target_id=key_id)
                 return self.forward_to_successor(message)
@@ -713,7 +717,11 @@ class Node:
                     return self.make_response(
                         "OK",
                         req_id=req_id,
-                        data={"result": local, "served_by": self.port},
+                        data={
+                            "result": local,
+                            "served_by": self.port,
+                            "path": data.get("path", []) + [self.port],
+                        },
                     )
 
                 # Ask tail directly
@@ -735,16 +743,25 @@ class Node:
                 return self.make_response(
                     "OK",
                     req_id=req_id,
-                    data={"result": local, "served_by": self.port},
+                    data={
+                        "result": local,
+                        "served_by": self.port,
+                        "path": data.get("path", []) + [self.port],
+                    },
                 )
 
             if self.is_responsible(key_id):
                 return self.make_response(
                     "OK",
                     req_id=req_id,
-                    data={"result": None, "served_by": self.port},
+                    data={
+                        "result": None,
+                        "served_by": self.port,
+                        "path": data.get("path", []) + [self.port],
+                    },
                 )
 
+            data.setdefault("path", []).append(self.port)
             if self.use_fingers:
                 return self.forward_with_ttl(message, target_id=key_id)
             else:
