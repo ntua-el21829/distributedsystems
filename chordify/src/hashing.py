@@ -23,13 +23,15 @@ def in_interval(x, a, b):
         return x > a or x <= b
 
 
-def in_open_interval(self, x: int, a: int, b: int) -> bool:
-    # Degenerate case: empty interval
+def in_open_interval(x: int, a: int, b: int) -> bool:
+    """
+    Returns True if x ∈ (a, b) in circular ID space (open interval).
+    """
     if a == b:
         return False
 
-    # Use existing (a, b] helper and exclude b
-    if in_interval(x, a, b) and x != b:
-        return True
-
-    return False
+    if a < b:
+        return a < x < b
+    else:
+        # wrap around
+        return x > a or x < b

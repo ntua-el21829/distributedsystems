@@ -271,7 +271,7 @@ class Node:
                 continue
 
             # Strict open interval (self, target)
-            if in_open_interval(fid, self.node_id, target_id, MAX_ID):
+            if in_open_interval(fid, self.node_id, target_id):
                 return f
 
         # Fallback
@@ -693,6 +693,8 @@ class Node:
 
             # Linear: ensure request reaches PRIMARY first
             if self.consistency == "linear" and not self.is_responsible(key_id):
+                if self.use_fingers:
+                    return self.forward_with_ttl(message, target_id=key_id)
                 return self.forward_to_successor(message)
 
             # ================= LINEAR MODE =================
@@ -744,7 +746,7 @@ class Node:
                 )
 
             if self.use_fingers:
-                return self.forward_with_ttl(message, key_id)
+                return self.forward_with_ttl(message, target_id=key_id)
             else:
                 return self.forward_to_successor(message)
 
@@ -758,6 +760,8 @@ class Node:
 
             # Linear mode: ensure request reaches PRIMARY first
             if self.consistency == "linear" and not self.is_responsible(key_id):
+                if self.use_fingers:
+                    return self.forward_with_ttl(message, target_id=key_id)
                 return self.forward_to_successor(message)
 
             if self.is_responsible(key_id):
@@ -814,7 +818,7 @@ class Node:
                 )
 
             if self.use_fingers:
-                return self.forward_with_ttl(message, key_id)
+                return self.forward_with_ttl(message, target_id=key_id)
             else:
                 return self.forward_to_successor(message)
 

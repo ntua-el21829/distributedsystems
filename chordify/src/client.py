@@ -41,7 +41,7 @@ class ChordifyClient:
         print(resp)
 
     def overlay(self):
-        resp = self._make_request("OVERLAY", {})
+        resp = self._make_request("OVERLAY", {"start_id": None, "acc": []})
         print(resp)
 
     def depart(self):
@@ -120,6 +120,7 @@ class ChordifyClient:
 
 
 # -------------------- MAIN -------------------- #
+
 
 def main():
     parser = argparse.ArgumentParser(description="Chordify CLI Client")
