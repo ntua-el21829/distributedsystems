@@ -53,3 +53,9 @@ class Storage:
                 for kid, rec in self.data.items()
                 if rec.get("is_replica") is False
             }
+
+    def delete_replicas_only(self):
+        with self.lock:
+            to_delete = [kid for kid, rec in self.data.items() if rec.get("is_replica")]
+            for kid in to_delete:
+                del self.data[kid]

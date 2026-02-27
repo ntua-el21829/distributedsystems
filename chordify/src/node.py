@@ -1053,6 +1053,41 @@ class Node:
 
             return self.make_response("OK", req_id=req_id, data={"pushed": pushed})
 
+        # --- CLEAR_REPLICAS: delete all replica entries locally ---
+        if msg_type == "CLEAR_REPLICAS":
+            self.storage.delete_replicas_only()
+            return self.make_response(
+                "OK", req_id=req_id, data={"msg": "Replicas cleared"}
+            )
+
+        # --- CLEAR_REPLICAS_RING: walk ring and clear replicas on every node ---
+        if msg_type == "CLEAR_REPLICAS_RING":
+            start_id = data.get("start_id")
+            if start_id is None:
+                return self.make_response(
+                    "ERROR", req_id=req_id, error="Missing start_id"
+                )
+
+            # clear myself
+            self.storage.delete_replicas_only()
+
+            # stop condition
+            if self.successor["id"] == start_id:
+                return self.make_response(
+                    "OK", req_id=req_id, data={"msg": "Clear replicas completed"}
+                )
+
+            return send_request(
+                self.successor["ip"],
+                self.successor["port"],
+                {
+                    "type": "CLEAR_REPLICAS_RING",
+                    "req_id": req_id,
+                    "origin": message.get("origin"),
+                    "data": {"start_id": start_id},
+                },
+            )
+
         # --- REPAIR_RING: walk ring and call REPAIR_REPLICAS on every node ---
         if msg_type == "REPAIR_RING":
             start_id = data.get("start_id")
@@ -1062,14 +1097,29 @@ class Node:
                 )
 
             # repair myself
-            self.handle_message(
-                {
-                    "type": "REPAIR_REPLICAS",
-                    "req_id": req_id,
-                    "origin": message.get("origin"),
-                    "data": {},
-                }
-            )
+            primary_items = self.storage.get_primary_only()
+            replicas = self.get_replica_nodes()
+            primary_info = {"ip": self.ip, "port": self.port, "id": self.node_id}
+
+            pushed = 0
+            for key_id, rec in primary_items.items():
+                for r in replicas:
+                    send_request(
+                        r["ip"],
+                        r["port"],
+                        {
+                            "type": "REPLICA_PUT",
+                            "req_id": req_id,
+                            "origin": {"ip": self.ip, "port": self.port},
+                            "data": {
+                                "key_id": int(key_id),
+                                "key": rec["key"],
+                                "value": rec["value"],
+                                "primary": primary_info,
+                            },
+                        },
+                    )
+                    pushed += 1
 
             # stop condition
             if self.successor["id"] == start_id:
@@ -1157,8 +1207,24 @@ if __name__ == "__main__":
         # Needs bootstrap info; if missing, do nothing
         if args.bootstrap_port is None:
             return
+
         try:
             bs_id = get_node_id(args.bootstrap_ip, args.bootstrap_port)
+
+            # 1) CLEAR stale replicas ring-wide (critical to keep exactly k copies)
+            clr = send_request(
+                args.bootstrap_ip,
+                args.bootstrap_port,
+                {
+                    "type": "CLEAR_REPLICAS_RING",
+                    "req_id": f"clear_{tag}_{args.port}",
+                    "origin": {"ip": args.ip, "port": args.port},
+                    "data": {"start_id": bs_id},
+                },
+            )
+            print("CLEAR_REPLICAS_RING:", clr)
+
+            # 2) Rebuild replicas ring-wide
             rep = send_request(
                 args.bootstrap_ip,
                 args.bootstrap_port,
@@ -1170,8 +1236,23 @@ if __name__ == "__main__":
                 },
             )
             print("REPAIR_RING:", rep)
+
+            # 3) Optional: rebuild fingers ring-wide
+            if args.use_fingers:
+                rf = send_request(
+                    args.bootstrap_ip,
+                    args.bootstrap_port,
+                    {
+                        "type": "REBUILD_FINGERS_RING",
+                        "req_id": f"rebuild_fingers_{tag}_{args.port}",
+                        "origin": {"ip": args.ip, "port": args.port},
+                        "data": {"start_id": bs_id},
+                    },
+                )
+                print("REBUILD_FINGERS_RING:", rf)
+
         except Exception as e:
-            print("REPAIR_RING failed:", e)
+            print("Ring maintenance failed:", e)
 
     # ---- overlay CLI ----
     if args.overlay:
@@ -1205,7 +1286,6 @@ if __name__ == "__main__":
         # After a topology change, rebuild replicas if possible
         if args.k > 1:
             maybe_repair_ring("after_depart")
-
 
         if args.use_fingers and args.bootstrap_port is not None:
             bs_id = get_node_id(args.bootstrap_ip, args.bootstrap_port)
