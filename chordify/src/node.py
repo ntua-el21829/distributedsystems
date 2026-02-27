@@ -848,6 +848,26 @@ class Node:
                 "OK", req_id=req_id, data={"msg": "Depart completed"}
             )
 
+        if msg_type == "REBUILD_FINGERS_RING":
+            start_id = data.get("start_id")
+
+            if self.use_fingers:
+                self.build_finger_table()
+
+            if self.successor["id"] == start_id:
+                return self.make_response("OK", req_id=req_id)
+
+            return send_request(
+                self.successor["ip"],
+                self.successor["port"],
+                {
+                    "type": "REBUILD_FINGERS_RING",
+                    "req_id": req_id,
+                    "origin": message.get("origin"),
+                    "data": {"start_id": start_id},
+                },
+            )
+
         # --- OVERLAY ---
         if msg_type == "OVERLAY":
             start_id = data.get("start_id")
@@ -1183,8 +1203,19 @@ if __name__ == "__main__":
 
         # After a topology change, rebuild replicas if possible
         maybe_repair_ring("after_depart")
-        if args.use_fingers:
-            node.build_finger_table()
+        if args.use_fingers and args.bootstrap_port is not None:
+            bs_id = get_node_id(args.bootstrap_ip, args.bootstrap_port)
+
+            send_request(
+                args.bootstrap_ip,
+                args.bootstrap_port,
+                {
+                    "type": "REBUILD_FINGERS_RING",
+                    "req_id": f"rebuild_fingers_{args.port}",
+                    "origin": {"ip": args.ip, "port": args.port},
+                    "data": {"start_id": bs_id},
+                },
+            )
 
         raise SystemExit(0)
 
@@ -1339,7 +1370,17 @@ if __name__ == "__main__":
             maybe_repair_ring("after_join")
 
         if args.use_fingers:
-            node.build_finger_table()
+            # rebuild fingers in whole ring
+            send_request(
+                node.ip,
+                node.port,
+                {
+                    "type": "REBUILD_FINGERS_RING",
+                    "req_id": f"rebuild_fingers_{args.port}",
+                    "origin": {"ip": node.ip, "port": node.port},
+                    "data": {"start_id": node.node_id},
+                },
+            )
 
     # -------------------------
     # Always start server
