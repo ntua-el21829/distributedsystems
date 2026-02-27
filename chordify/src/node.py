@@ -723,7 +723,7 @@ class Node:
                             "path": data.get("path", []) + [self.port],
                         },
                     )
-
+                data.setdefault("path", []).append(self.port)
                 # Ask tail directly
                 return send_request(
                     tail["ip"],
@@ -732,7 +732,7 @@ class Node:
                         "type": "CHAIN_GET",
                         "req_id": req_id,
                         "origin": message.get("origin"),
-                        "data": {"key_id": key_id},
+                        "data": {"key_id": key_id, "path": data.get("path", [])},
                     },
                 )
 
@@ -782,6 +782,13 @@ class Node:
                 return self.forward_to_successor(message)
 
             if self.is_responsible(key_id):
+                # Check existence BEFORE deleting
+                existing = self.storage.query(key_id)
+
+                if existing is None:
+                    return self.make_response(
+                        "ERROR", req_id=req_id, error="Key not found"
+                    )
 
                 # ================= LINEAR MODE =================
                 if self.consistency == "linear":
@@ -977,10 +984,23 @@ class Node:
                 )
 
             key_id = int(kid)
+
+            #  Πάρε το path που ήρθε
+            path = data.get("path", [])
+
+            #  Πρόσθεσε το current node (tail)
+            path = path + [self.port]
+
             local = self.storage.query(key_id)
 
             return self.make_response(
-                "OK", req_id=req_id, data={"result": local, "served_by": self.port}
+                "OK",
+                req_id=req_id,
+                data={
+                    "result": local,
+                    "served_by": self.port,
+                    "path": path,
+                },
             )
 
         if msg_type == "CHAIN_DELETE":

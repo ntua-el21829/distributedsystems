@@ -240,28 +240,53 @@ def home():
 @app.route("/insert", methods=["POST"])
 def insert():
     resp = make_request(
-        "INSERT",
-        {"key": request.form["key"], "value": request.form["value"]},
+        "INSERT", {"key": request.form["key"], "value": request.form["value"]}
     )
 
-    if resp.get("status") == "OK":
-        stored_at = resp.get("data", {}).get("stored_at")
-        replicas = resp.get("data", {}).get("replicas", 0)
+    if resp.get("status") != "OK":
+        return render_page(f"Insert failed: {resp}")
 
-        return render_page(f"Stored at node {stored_at} with {replicas} replica(s)")
+    d = resp.get("data", {}) or {}
 
-    return render_page("Insert failed")
+    # Eventual usually: stored_at + replicas
+    stored_at = d.get("stored_at")
+    replicas = d.get("replicas")
+
+    # Linear chain commit: committed_at
+    committed_at = d.get("committed_at")
+
+    # Linear k=1: might include mode
+    mode = d.get("mode")
+
+    if committed_at is not None:
+        msg = f"Write committed at node {committed_at} (linear chain)"
+    elif stored_at is not None:
+        if replicas is None:
+            msg = f"Stored at node {stored_at}" + (f" ({mode})" if mode else "")
+        else:
+            msg = f"Stored at node {stored_at} with {replicas} replica(s)"
+    else:
+        # fallback – show raw data to not lie
+        msg = f"Insert OK: {d}"
+
+    return render_page(msg)
 
 
 @app.route("/delete", methods=["POST"])
 def delete():
     resp = make_request("DELETE", {"key": request.form["key"]})
 
-    if resp.get("status") == "OK":
-        deleted_from = resp.get("data", {}).get("deleted_from")
-        return render_page(f"Deleted from node {deleted_from}")
+    if resp.get("status") != "OK":
+        return render_page("Delete failed")
 
-    return render_page("Delete failed")
+    data = resp.get("data", {}) or {}
+
+    deleted_at = data.get("deleted_at")
+
+    if deleted_at is not None:
+        return render_page(f"Deleted at node {deleted_at}")
+
+    return render_page(f"Delete OK: {data}")
 
 
 @app.route("/query", methods=["POST"])
