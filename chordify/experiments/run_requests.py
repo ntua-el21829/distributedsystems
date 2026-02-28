@@ -11,9 +11,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-port", type=int, default=5000)
     parser.add_argument(
-        "--node", type=int, default=0, help="Node id that will execute the workload"
+        "--node", type=int, default=0, help="Node index that will execute the workload"
     )
     parser.add_argument("--consistency", required=True, choices=["linear", "eventual"])
+
     args = parser.parse_args()
 
     node_port = args.base_port + args.node
@@ -30,14 +31,20 @@ def main():
     with open(output_file, "w", encoding="utf-8") as out:
 
         for i, line in enumerate(lines):
-            parts = [p.strip() for p in line.strip().replace(",", " ").split()]
 
-            if not parts:
+            line = line.strip()
+            if not line:
                 continue
+
+            # ✅ Σωστό parsing με βάση το κόμμα
+            parts = [p.strip() for p in line.split(",")]
 
             operation = parts[0].lower()
 
             if operation == "insert":
+                if len(parts) != 3:
+                    continue
+
                 key = parts[1]
                 value = parts[2]
 
@@ -51,6 +58,9 @@ def main():
                 send_request("127.0.0.1", node_port, msg)
 
             elif operation == "query":
+                if len(parts) != 2:
+                    continue
+
                 key = parts[1]
 
                 msg = {
@@ -69,7 +79,8 @@ def main():
 
                 out.write(f"{i}: {key} -> {result}\n")
 
-            time.sleep(0.05)  # μικρό spacing για καθαρό ordering
+            # μικρό spacing για ordering
+            time.sleep(0.05)
 
     print(f"\nResults saved to {output_file}\n")
 

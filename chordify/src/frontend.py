@@ -155,8 +155,8 @@ def render_page(content="", ring_data=None):
             }}
 
             .path-node {{
-                background: #a371f7 !important;
-                box-shadow:0 0 15px #a371f7;
+                background: 3px solid #a371f7 !important;
+                box-shadow: 0 0 15px #a371f7;
             }}
             .results-area {{ margin-top: 15px; padding: 12px; background: #0d1117; border-radius: 8px; border-left: 3px solid var(--accent); font-family: monospace; font-size: 12px; }}
         </style>
@@ -291,7 +291,7 @@ def delete():
 
 @app.route("/query", methods=["POST"])
 def query():
-    global last_served_node, last_role
+    global last_served_node, last_role, last_path
 
     key = request.form["key"]
     resp = make_request("QUERY", {"key": key})
