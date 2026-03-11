@@ -12,8 +12,18 @@ class Storage:
         with self.lock:
             if key_id in self.data:
                 # concat update
-                self.data[key_id]["value"] += "," + value
-                self.data[key_id]["is_replica"] = False
+                if self.data[key_id].get("is_replica") is True:
+                    self.data[key_id] = {
+                        "key": key,
+                        "value": value,
+                        "is_replica": False,
+                        "primary": None,
+                    }
+                else:
+                    # κανονικό Chordify update: concat
+                    self.data[key_id]["value"] += "," + value
+                    self.data[key_id]["is_replica"] = False
+                    self.data[key_id]["primary"] = None
             else:
                 self.data[key_id] = {
                     "key": key,

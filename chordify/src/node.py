@@ -115,6 +115,22 @@ class Node:
             },
         )
 
+        # 3) Ask successor to rebuild replicas for the primaries it now owns
+        if self.k > 1:
+            try:
+                send_request(
+                    succ["ip"],
+                    succ["port"],
+                    {
+                        "type": "REPAIR_REPLICAS",
+                        "req_id": "depart_repair_successor",
+                        "origin": {"ip": self.ip, "port": self.port},
+                        "data": {},
+                    },
+                )
+            except Exception:
+                pass
+
     def get_overlay(self):
         # If single node
         if self.successor["id"] == self.node_id:
