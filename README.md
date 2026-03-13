@@ -26,18 +26,6 @@ Each node participates in a logical **Chord ring** and is responsible for a port
 
 ---
 
-# 📁 Project Structure
-chordify/
-│
-├── node.py # Core Chord node implementation
-├── client.py # CLI client for interacting with the network
-├── storage.py # Local key-value storage layer
-├── hashing.py # SHA1 hashing and ring interval logic
-├── net.py # Network communication utilities
-│
-├── experiments/ # Scripts used for performance experiments
-└── README.md
-
 # ⚙️ System Functionality
 
 ### Core DHT Operations
