@@ -122,29 +122,20 @@ help
 
 ## Experiments
 
-The system was evaluated using different configurations:
+The system was evaluated using different configurations: 
+- 10 nodes
+- Replication factors:
+-- k = 1
+-- k = 3
+-- k = 5
 
-10 nodes
-
-Replication factors:
-
-k = 1
-
-k = 3
-
-k = 5
-
-Consistency modes:
-
-Linearizability
-
-Eventual Consistency
+- Consistency modes:
+-- Linearizability
+-- Eventual Consistency
 
 Metrics measured:
-
-Write throughput
-
-Read throughput
+- Write throughput
+- Read throughput
 
 The experiments highlight the trade-offs between replication, consistency, and performance.
 
