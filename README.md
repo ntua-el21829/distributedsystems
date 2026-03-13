@@ -140,6 +140,6 @@ Metrics measured:
 The experiments highlight the trade-offs between replication, consistency, and performance.
 
 👨‍💻 Team
-Fany Kalogianni https://github.com/fanykl
-Alexandra Moraitaki https://github.com/alexandramoraitaki
-Thanasis Tsiatouras https://github.com/Thanasis-Tsiatouras
+- Fany Kalogianni https://github.com/fanykl
+- Alexandra Moraitaki https://github.com/alexandramoraitaki
+- Thanasis Tsiatouras https://github.com/Thanasis-Tsiatouras
